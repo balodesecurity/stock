@@ -8,14 +8,15 @@ An Indian stock analysis system that scrapes financial data from screener.in, fe
 
 **Database:** `derived_metrics_analysis.db` (SQLite, ~35 MB)
 **Portal:** `stock_portal.py` (Streamlit on port 8501)
-**Virtual env:** `../venv/` (one level up from the stock/ directory)
+**Virtual env:** `/home/amitbalode/personnel/venv/`
 
 ## Development Setup
 
 ```bash
-cd /Users/abalode/personnel/stock
-source ../venv/bin/activate
+cd /home/amitbalode/personnel/stock
+source /home/amitbalode/personnel/venv/bin/activate
 pip install -r requirements.txt
+# Note: requirements.txt is incomplete. Also install: streamlit yfinance pytz
 ```
 
 ## Architecture & Data Flow

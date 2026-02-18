@@ -31,3 +31,9 @@ logs/
 
 # Cache
 cache/
+
+# Certificates and private keys
+*.cert
+*.key
+*.p12
+*.pem
