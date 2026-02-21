@@ -970,6 +970,12 @@ def sync_single_company(company_code):
     conn.commit()
     conn.close()
     logger.info(f"✓ {company_code} enabled.")
+
+    # Fetch live price now that company is confirmed in DB
+    logger.info(f"Fetching live price for {company_code}...")
+    from update_stock_prices_v2 import update_prices_quick
+    update_prices_quick(force=True, company_filter=[company_code])
+
     logger.info("="*80)
     logger.info(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("="*80)

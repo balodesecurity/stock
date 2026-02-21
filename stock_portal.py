@@ -371,16 +371,10 @@ def main():
                         ok, msg = add_to_static_portfolio(code)
                         if ok:
                             stock_dir = os.path.dirname(os.path.abspath(__file__))
-                            # 1. Download screener data + metrics for this company
+                            # Download screener data + live price in one background process
                             subprocess.Popen(
                                 [sys.executable, os.path.join(stock_dir, 'sync_new_companies.py'),
                                  '--companies', code],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                            )
-                            # 2. Fetch live price from Yahoo Finance
-                            subprocess.Popen(
-                                [sys.executable, os.path.join(stock_dir, 'update_stock_prices_v2.py'),
-                                 '--force', '--companies', code],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                             )
                             st.success(msg + f" Syncing data for {code} in background — refresh in ~60 seconds.")
