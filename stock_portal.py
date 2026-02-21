@@ -6,6 +6,8 @@ Built with Streamlit
 
 import os
 import re
+import subprocess
+import sys
 import streamlit as st
 import pandas as pd
 import sqlite3
@@ -368,7 +370,20 @@ def main():
                     else:
                         ok, msg = add_to_static_portfolio(code)
                         if ok:
-                            st.success(msg + " Check back after 24 hours for full data of this company.")
+                            stock_dir = os.path.dirname(os.path.abspath(__file__))
+                            # 1. Download screener data + metrics for this company
+                            subprocess.Popen(
+                                [sys.executable, os.path.join(stock_dir, 'sync_new_companies.py'),
+                                 '--companies', code],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                            )
+                            # 2. Fetch live price from Yahoo Finance
+                            subprocess.Popen(
+                                [sys.executable, os.path.join(stock_dir, 'update_stock_prices_v2.py'),
+                                 '--force', '--companies', code],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                            )
+                            st.success(msg + f" Syncing data for {code} in background — refresh in ~60 seconds.")
                         else:
                             st.error(msg)
 

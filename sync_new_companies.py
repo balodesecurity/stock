@@ -943,12 +943,55 @@ def main():
     logger.info(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("="*80)
 
+def sync_single_company(company_code):
+    """Targeted sync for a single company — skips filter fetch, just downloads and enables."""
+    logger.info("="*80)
+    logger.info(f"TARGETED SYNC: {company_code}")
+    logger.info("="*80)
+    logger.info(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+    ensure_enabled_column()
+
+    existing = get_existing_companies()
+    if company_code in existing:
+        logger.info(f"✓ {company_code} already exists in DB — skipping screener download.")
+    else:
+        ok = add_company_to_db(company_code)
+        if not ok:
+            logger.info(f"✗ Failed to add {company_code}.")
+            return
+
+    # Mark the company as enabled
+    conn = sqlite3.connect(DATABASE_PATH)
+    conn.execute(
+        "UPDATE screener_companies SET enabled = 1 WHERE company_code = ?",
+        (company_code,)
+    )
+    conn.commit()
+    conn.close()
+    logger.info(f"✓ {company_code} enabled.")
+    logger.info("="*80)
+    logger.info(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("="*80)
+
+
 if __name__ == "__main__":
     from lib import ScriptLock
+
+    # Parse --companies flag for targeted single-company sync
+    companies_arg = None
+    if "--companies" in sys.argv:
+        idx = sys.argv.index("--companies") + 1
+        if idx < len(sys.argv):
+            companies_arg = sys.argv[idx].upper()
+
     lock = ScriptLock('sync_companies', logger=logger)
     if not lock.acquire():
         sys.exit(0)
     try:
-        main()
+        if companies_arg:
+            sync_single_company(companies_arg)
+        else:
+            main()
     finally:
         lock.release()
