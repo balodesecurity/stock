@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 import pandas as pd
 import json
 import sys
+import time
 from typing import Dict, List, Optional
 from urllib.parse import urljoin
 
@@ -24,13 +25,26 @@ class ScreenerDownloader:
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
         })
 
-    def download_company_data(self, company_code: str, report_type: str = "consolidated") -> Dict:
+    def _has_valid_financial_data(self, data: Dict) -> bool:
+        """Check if at least one financial section has real column values (not just metric names)."""
+        for key in ('quarterly_results', 'annual_profit_loss', 'balance_sheet'):
+            rows = data.get(key) or []
+            for row in rows:
+                # A valid row has more than just the metric name key ('')
+                if len(row) > 1:
+                    return True
+        return False
+
+    def download_company_data(self, company_code: str, report_type: str = "consolidated",
+                              max_retries: int = 5, retry_delay: float = 3.0) -> Dict:
         """
         Download financial data for a company
 
         Args:
             company_code: Stock symbol (e.g., 'NH', 'RELIANCE')
             report_type: 'consolidated', 'standalone', or '' (base URL)
+            max_retries: Number of times to retry if page returns empty table data
+            retry_delay: Seconds to wait between retries
 
         Returns:
             Dictionary containing all parsed financial data
@@ -41,36 +55,50 @@ class ScreenerDownloader:
             url = f"{self.BASE_URL}/company/{company_code}/"
         print(f"Fetching data from: {url}")
 
-        try:
-            response = self.session.get(url)
-            response.raise_for_status()
-        except requests.RequestException as e:
-            print(f"Error fetching data: {e}")
-            return {}
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = self.session.get(url)
+                response.raise_for_status()
+            except requests.RequestException as e:
+                print(f"Error fetching data (attempt {attempt}/{max_retries}): {e}")
+                if attempt < max_retries:
+                    time.sleep(retry_delay)
+                    continue
+                return {}
 
-        soup = BeautifulSoup(response.content, 'lxml')
+            soup = BeautifulSoup(response.content, 'lxml')
 
-        # Extract company name
-        company_name = self._extract_company_name(soup)
+            # Extract company name
+            company_name = self._extract_company_name(soup)
 
-        # Extract sector and industry from peer-comparison section
-        sector_industry = self._extract_sector_industry(soup)
+            # Extract sector and industry from peer-comparison section
+            sector_industry = self._extract_sector_industry(soup)
 
-        data = {
-            'company_code': company_code,
-            'company_name': company_name,
-            'report_type': report_type,
-            'url': url,
-            'sector': sector_industry['sector'],
-            'industry': sector_industry['industry'],
-            'quarterly_results': self._extract_quarterly_results(soup),
-            'annual_profit_loss': self._extract_annual_pl(soup),
-            'balance_sheet': self._extract_balance_sheet(soup),
-            'cash_flow': self._extract_cash_flow(soup),
-            'ratios': self._extract_ratios(soup),
-            'shareholding': self._extract_shareholding(soup),
-        }
+            data = {
+                'company_code': company_code,
+                'company_name': company_name,
+                'report_type': report_type,
+                'url': url,
+                'sector': sector_industry['sector'],
+                'industry': sector_industry['industry'],
+                'quarterly_results': self._extract_quarterly_results(soup),
+                'annual_profit_loss': self._extract_annual_pl(soup),
+                'balance_sheet': self._extract_balance_sheet(soup),
+                'cash_flow': self._extract_cash_flow(soup),
+                'ratios': self._extract_ratios(soup),
+                'shareholding': self._extract_shareholding(soup),
+            }
 
+            if self._has_valid_financial_data(data):
+                if attempt > 1:
+                    print(f"  ✓ Got valid data on attempt {attempt}/{max_retries}")
+                return data
+
+            print(f"  ⚠ Attempt {attempt}/{max_retries}: table data appears empty (JS not loaded?), retrying in {retry_delay}s...")
+            if attempt < max_retries:
+                time.sleep(retry_delay)
+
+        print(f"  ✗ All {max_retries} attempts returned empty table data for {company_code}")
         return data
 
     def _extract_company_name(self, soup: BeautifulSoup) -> str:
