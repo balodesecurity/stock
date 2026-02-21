@@ -215,6 +215,33 @@ def parse_screener_url(url):
         return None, "Invalid URL. Expected format: https://www.screener.in/company/CODE/consolidated/"
     return match.group(1).upper(), None
 
+def delete_company(company_code):
+    """Delete a company from all tables in the database. Returns (success, message)."""
+    conn = get_connection()
+    tables = [
+        'derived_metrics_analysis',
+        'screener_companies',
+        'portfolios',
+        'screener_quarterly',
+        'screener_annual_pl',
+        'screener_balance_sheet',
+        'screener_cash_flow',
+        'screener_ratios',
+        'screener_shareholding',
+        'screener_daily_prices',
+        'yahoo_ticker_cache',
+    ]
+    try:
+        total_deleted = 0
+        for table in tables:
+            cur = conn.execute(f"DELETE FROM {table} WHERE company_code = ?", (company_code,))
+            total_deleted += cur.rowcount
+        conn.commit()
+        return True, f"Deleted {company_code} from {len(tables)} tables ({total_deleted} rows removed)."
+    except Exception as e:
+        return False, f"Failed to delete {company_code}: {e}"
+
+
 def add_to_static_portfolio(company_code):
     """Insert a company code into the Static portfolio in the DB. Returns (success, message)."""
     conn = get_connection()
@@ -380,6 +407,39 @@ def main():
                             st.success(msg + f" Syncing data for {code} in background — refresh in ~60 seconds.")
                         else:
                             st.error(msg)
+
+    # Delete Stock
+    st.sidebar.markdown("---")
+    st.sidebar.header("🗑️ Delete Stock")
+    with st.sidebar.form("delete_stock_form", clear_on_submit=True):
+        delete_code = st.text_input(
+            "Company Code",
+            placeholder="e.g. RUBICON",
+        ).upper().strip()
+        confirm = st.checkbox("I confirm — permanently delete this company and all its data")
+        submitted = st.form_submit_button("Delete Company", type="primary")
+        if submitted:
+            if not delete_code:
+                st.error("Enter a company code.")
+            elif not confirm:
+                st.warning("Check the confirmation box to proceed.")
+            else:
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT company_name FROM derived_metrics_analysis WHERE company_code = ?",
+                    (delete_code,)
+                )
+                row = cursor.fetchone()
+                if not row:
+                    st.error(f"{delete_code} not found in database.")
+                else:
+                    company_name = row[0]
+                    ok, msg = delete_company(delete_code)
+                    if ok:
+                        st.success(f"✓ {company_name} ({delete_code}) deleted. {msg}")
+                    else:
+                        st.error(msg)
 
     # Apply filters
     filtered_df = df.copy()
