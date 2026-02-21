@@ -976,6 +976,11 @@ def sync_single_company(company_code):
     from update_stock_prices_v2 import update_prices_quick
     update_prices_quick(force=True, company_filter=[company_code])
 
+    # Recalculate all derived metrics so the new company is fully populated
+    logger.info(f"Recalculating derived metrics for all companies...")
+    from update_derived_metrics import update_all_metrics
+    update_all_metrics()
+
     logger.info("="*80)
     logger.info(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("="*80)

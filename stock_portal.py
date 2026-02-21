@@ -215,6 +215,23 @@ def parse_screener_url(url):
         return None, "Invalid URL. Expected format: https://www.screener.in/company/CODE/consolidated/"
     return match.group(1).upper(), None
 
+@st.dialog("Confirm Delete")
+def confirm_delete_dialog(company_code: str):
+    st.markdown(f"Delete **{company_code}** from all tables?")
+    st.caption("This action cannot be undone.")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("✅ Confirm", use_container_width=True):
+            ok, msg = delete_company(company_code)
+            if ok:
+                st.success(msg)
+            else:
+                st.error(msg)
+            st.rerun()
+    with col2:
+        if st.button("❌ Cancel", use_container_width=True):
+            st.rerun()
+
 def delete_company(company_code):
     """Delete a company from all tables in the database. Returns (success, message)."""
     conn = get_connection()
@@ -408,39 +425,6 @@ def main():
                         else:
                             st.error(msg)
 
-    # Delete Stock
-    st.sidebar.markdown("---")
-    st.sidebar.header("🗑️ Delete Stock")
-    with st.sidebar.form("delete_stock_form", clear_on_submit=True):
-        delete_code = st.text_input(
-            "Company Code",
-            placeholder="e.g. RUBICON",
-        ).upper().strip()
-        confirm = st.checkbox("I confirm — permanently delete this company and all its data")
-        submitted = st.form_submit_button("Delete Company", type="primary")
-        if submitted:
-            if not delete_code:
-                st.error("Enter a company code.")
-            elif not confirm:
-                st.warning("Check the confirmation box to proceed.")
-            else:
-                conn = get_connection()
-                cursor = conn.cursor()
-                cursor.execute(
-                    "SELECT company_name FROM derived_metrics_analysis WHERE company_code = ?",
-                    (delete_code,)
-                )
-                row = cursor.fetchone()
-                if not row:
-                    st.error(f"{delete_code} not found in database.")
-                else:
-                    company_name = row[0]
-                    ok, msg = delete_company(delete_code)
-                    if ok:
-                        st.success(f"✓ {company_name} ({delete_code}) deleted. {msg}")
-                    else:
-                        st.error(msg)
-
     # Apply filters
     filtered_df = df.copy()
 
@@ -547,7 +531,10 @@ def main():
             'qoq_profit_growth', 'qoq_profit_growth_prev', 'yoy_profit_growth', 'yoy_sales_growth', 'latest_quarter', 'prev_quarter',
             'promoter_trend_display',
             'npm', 'total_fcf', 'fcf_cfo_ratio', 'debt_to_equity',
-        ]].copy()
+        ]].copy().reset_index(drop=True)
+
+        # Capture company codes before URL conversion (used for delete)
+        company_codes = display_df['company_code'].tolist()
 
         # Format columns
         display_df['cmp'] = display_df.apply(lambda x: format_price(x['current_price'], x['price_change_pct'], x['updated_at']), axis=1)
@@ -664,11 +651,20 @@ def main():
             'FCF (10Y)', 'D/E',
         ]
 
-        st.dataframe(
+        # Add delete checkbox column at the front
+        display_df.insert(0, '🗑️', False)
+
+        edited_df = st.data_editor(
             display_df,
             use_container_width=True,
             height=600,
+            disabled=[c for c in display_df.columns if c != '🗑️'],
             column_config={
+                "🗑️": st.column_config.CheckboxColumn(
+                    "🗑️",
+                    help="Check to delete this company from all tables",
+                    width="small",
+                ),
                 "Code": st.column_config.LinkColumn(
                     "Code",
                     help="Click to view company on Screener.in",
@@ -737,6 +733,11 @@ def main():
                 ),
             }
         )
+
+        # Handle per-row delete — open dialog for first checked row
+        checked_indices = edited_df[edited_df['🗑️']].index.tolist()
+        if checked_indices:
+            confirm_delete_dialog(company_codes[checked_indices[0]])
 
         # Download button
         csv = filtered_df.to_csv(index=False)
