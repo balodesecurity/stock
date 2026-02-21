@@ -9,7 +9,7 @@ import re
 import streamlit as st
 import pandas as pd
 import sqlite3
-from constants import STATIC_PORTFOLIO
+from constants import DATABASE_PATH
 
 # Page configuration
 st.set_page_config(
@@ -42,7 +42,7 @@ st.markdown("""
 # Database connection
 @st.cache_resource
 def get_connection():
-    conn = sqlite3.connect('derived_metrics_analysis.db', check_same_thread=False)
+    conn = sqlite3.connect(str(DATABASE_PATH), check_same_thread=False)
     # Ensure enabled column exists in screener_companies
     try:
         conn.execute("ALTER TABLE screener_companies ADD COLUMN enabled INTEGER DEFAULT 1")
@@ -214,26 +214,17 @@ def parse_screener_url(url):
     return match.group(1).upper(), None
 
 def add_to_static_portfolio(company_code):
-    """Append a company code to STATIC_PORTFOLIO in constants.py. Returns (success, message)."""
-    constants_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'constants.py')
-    with open(constants_path, 'r') as f:
-        content = f.read()
-
-    # Find the closing bracket of STATIC_PORTFOLIO list
-    pattern = re.compile(r'(STATIC_PORTFOLIO\s*=\s*\[.*?)(])', re.DOTALL)
-    match = pattern.search(content)
-    if not match:
-        return False, "Could not locate STATIC_PORTFOLIO in constants.py."
-
-    list_body = match.group(1)
-    # Insert new entry before the closing bracket
-    new_entry = f"    '{company_code}',\n"
-    updated = content[:match.end(1)] + new_entry + match.group(2) + content[match.end():]
-
-    with open(constants_path, 'w') as f:
-        f.write(updated)
-
-    return True, f"Added {company_code} to Static Portfolio."
+    """Insert a company code into the Static portfolio in the DB. Returns (success, message)."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO portfolios (portfolio_name, company_code) VALUES ('Static', ?)",
+            (company_code,)
+        )
+        conn.commit()
+        return True, f"Added {company_code} to Static Portfolio."
+    except Exception as e:
+        return False, f"Failed to add {company_code}: {e}"
 
 
 # Main app
@@ -273,7 +264,10 @@ def main():
         cursor.execute("SELECT company_code FROM portfolios WHERE portfolio_name = 'Paytmmoney'")
         portfolio_codes = [row[0] for row in cursor.fetchall()]
     elif portfolio_filter == "Static Portfolio":
-        portfolio_codes = STATIC_PORTFOLIO
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT company_code FROM portfolios WHERE portfolio_name = 'Static'")
+        portfolio_codes = [row[0] for row in cursor.fetchall()]
 
     st.sidebar.markdown("---")
 
@@ -352,8 +346,14 @@ def main():
             if err:
                 st.error(err)
             else:
-                # Check if already in STATIC_PORTFOLIO
-                if code in STATIC_PORTFOLIO:
+                # Check if already in Static Portfolio (DB)
+                conn = get_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT 1 FROM portfolios WHERE portfolio_name = 'Static' AND company_code = ?",
+                    (code,)
+                )
+                if cursor.fetchone():
                     st.warning(f"{code} is already in the Static Portfolio.")
                 else:
                     # Check if already exists in DB

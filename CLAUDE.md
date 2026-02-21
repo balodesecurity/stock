@@ -321,6 +321,9 @@ ORDER BY CAST(REPLACE(REPLACE(s.value, '%', ''), ',', '') AS REAL) DESC;
 ## Running Commands
 
 ```bash
+# Activate virtual environment (required before running any script)
+source /home/amitbalode/personnel/venv/bin/activate
+
 # Manual price update (force outside market hours)
 python update_stock_prices_v2.py --force
 

@@ -290,7 +290,7 @@ def update_prices_quick(force=False, company_filter=None):
         logger.info("Market is closed. Skipping quick update.")
         return
 
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30)
     cursor = conn.cursor()
 
     # Ensure enabled column exists
@@ -304,16 +304,22 @@ def update_prices_quick(force=False, company_filter=None):
     _ensure_ticker_cache(conn)
 
     # Get company codes (filtered or all, skip disabled)
-    if company_filter:
-        placeholders = ','.join('?' for _ in company_filter)
-        cursor.execute(f"""SELECT d.company_code FROM derived_metrics_analysis d
-                          JOIN screener_companies c ON d.company_code = c.company_code
-                          WHERE d.company_code IN ({placeholders}) AND d.company_name IS NOT NULL AND c.enabled = 1""",
-                       company_filter)
-    else:
-        cursor.execute("""SELECT d.company_code FROM derived_metrics_analysis d
-                         JOIN screener_companies c ON d.company_code = c.company_code
-                         WHERE d.company_name IS NOT NULL AND c.enabled = 1""")
+    try:
+        if company_filter:
+            placeholders = ','.join('?' for _ in company_filter)
+            cursor.execute(f"""SELECT d.company_code FROM derived_metrics_analysis d
+                              JOIN screener_companies c ON d.company_code = c.company_code
+                              WHERE d.company_code IN ({placeholders}) AND d.company_name IS NOT NULL AND c.enabled = 1""",
+                           company_filter)
+        else:
+            cursor.execute("""SELECT d.company_code FROM derived_metrics_analysis d
+                             JOIN screener_companies c ON d.company_code = c.company_code
+                             WHERE d.company_name IS NOT NULL AND c.enabled = 1""")
+    except sqlite3.OperationalError as e:
+        logger.error("DB error: %s", e)
+        logger.error("DATABASE_PATH = %s (exists=%s)", DATABASE_PATH, os.path.exists(DATABASE_PATH))
+        conn.close()
+        return
     all_companies = [row[0] for row in cursor.fetchall()]
 
     # Split companies by cache status
@@ -351,7 +357,10 @@ def update_prices_quick(force=False, company_filter=None):
 
     # --- Phase 1: Fetch companies with known cached tickers directly ---
     if cached_tickers:
-        for code, ticker in cached_tickers.items():
+        total_cached = len(cached_tickers)
+        for idx, (code, ticker) in enumerate(cached_tickers.items(), 1):
+            if idx == 1 or idx % 50 == 0 or idx == total_cached:
+                logger.info(f"⏳ Phase 1: fetching cached tickers {idx}/{total_cached} ✓{updated} ✗{failed}...")
             try:
                 data_fb = yf.download(ticker, period='1d', progress=False)
                 close_fb = float(data_fb['Close'].values.flat[-1])
@@ -366,9 +375,12 @@ def update_prices_quick(force=False, company_filter=None):
                         failed += 1
                 else:
                     failed += 1
-            except:
-                # Cached ticker no longer works — clear cache so it retries next run
+            except (KeyError, IndexError, ValueError):
+                # Yahoo responded but returned no valid data — ticker is likely delisted
                 _cache_ticker(cursor, code, None)
+                failed += 1
+            except Exception:
+                # Network/connection error — preserve the cached ticker for next run
                 failed += 1
         conn.commit()
 
@@ -428,10 +440,15 @@ def update_prices_quick(force=False, company_filter=None):
                     # Try fallback suffixes: .BO, then -SM.NS (SME stocks)
                     fallback_ok = False
                     resolved = None
+                    # Track whether Yahoo actually responded (vs network/connection error).
+                    # We only cache NULL when Yahoo confirmed no data; transient errors
+                    # should not permanently blacklist a ticker for YAHOO_FAILED_CACHE_DAYS.
+                    got_api_response = False
                     for suffix in ['.BO', '-SM.NS']:
                         try:
                             ticker_fb = f"{code}{suffix}"
                             data_fb = yf.download(ticker_fb, period='1d', progress=False)
+                            got_api_response = True  # Yahoo responded (even if data is empty/NaN)
                             close_fb = float(data_fb['Close'].values.flat[-1])
                             high_fb = float(data_fb['High'].values.flat[-1])
                             low_fb = float(data_fb['Low'].values.flat[-1])
@@ -443,7 +460,7 @@ def update_prices_quick(force=False, company_filter=None):
                                     fallback_ok = True
                                     resolved = ticker_fb
                                     break
-                        except:
+                        except Exception:
                             continue
                     # If download failed, try Ticker.info directly (works for SME/low-volume stocks)
                     if not fallback_ok:
@@ -451,6 +468,7 @@ def update_prices_quick(force=False, company_filter=None):
                             try:
                                 ticker_fb = f"{code}{suffix}"
                                 info = yf.Ticker(ticker_fb).info
+                                got_api_response = True  # Yahoo responded
                                 close_fb = info.get('currentPrice') or info.get('regularMarketPrice')
                                 if close_fb and close_fb > 0:
                                     high_fb = info.get('dayHigh', close_fb)
@@ -461,7 +479,7 @@ def update_prices_quick(force=False, company_filter=None):
                                         fallback_ok = True
                                         resolved = ticker_fb
                                         break
-                            except:
+                            except Exception:
                                 continue
                     # If all suffixes failed and code is numeric, try searching by company name
                     if not fallback_ok and code.isdigit():
@@ -472,6 +490,7 @@ def update_prices_quick(force=False, company_filter=None):
                                 found_ticker = search_ticker_by_name(row[0])
                                 if found_ticker:
                                     data_fb = yf.download(found_ticker, period='1d', progress=False)
+                                    got_api_response = True
                                     close_fb = float(data_fb['Close'].values.flat[-1])
                                     high_fb = float(data_fb['High'].values.flat[-1])
                                     low_fb = float(data_fb['Low'].values.flat[-1])
@@ -483,10 +502,13 @@ def update_prices_quick(force=False, company_filter=None):
                                             logger.info(f"   ✓ {code} resolved via name search → {found_ticker}")
                                             fallback_ok = True
                                             resolved = found_ticker
-                        except:
+                        except Exception:
                             pass
-                    # Cache the result
-                    _cache_ticker(cursor, code, resolved)
+                    # Only cache the result if Yahoo actually responded.
+                    # If all attempts threw network/connection errors, skip caching so the
+                    # ticker is retried next run instead of being blacklisted as a failure.
+                    if fallback_ok or got_api_response:
+                        _cache_ticker(cursor, code, resolved)
                     if not fallback_ok:
                         failed += 1
 
@@ -635,7 +657,7 @@ def update_fundamentals_full(force=False, company_filter=None):
 
     logger = setup_logger('full')
 
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30)
     cursor = conn.cursor()
 
     # Ensure enabled column exists
@@ -646,16 +668,22 @@ def update_fundamentals_full(force=False, company_filter=None):
         pass
 
     # Get company codes (filtered or all, skip disabled)
-    if company_filter:
-        placeholders = ','.join('?' for _ in company_filter)
-        cursor.execute(f"""SELECT d.company_code FROM derived_metrics_analysis d
-                          JOIN screener_companies c ON d.company_code = c.company_code
-                          WHERE d.company_code IN ({placeholders}) AND d.company_name IS NOT NULL AND c.enabled = 1""",
-                       company_filter)
-    else:
-        cursor.execute("""SELECT d.company_code FROM derived_metrics_analysis d
-                         JOIN screener_companies c ON d.company_code = c.company_code
-                         WHERE d.company_name IS NOT NULL AND c.enabled = 1""")
+    try:
+        if company_filter:
+            placeholders = ','.join('?' for _ in company_filter)
+            cursor.execute(f"""SELECT d.company_code FROM derived_metrics_analysis d
+                              JOIN screener_companies c ON d.company_code = c.company_code
+                              WHERE d.company_code IN ({placeholders}) AND d.company_name IS NOT NULL AND c.enabled = 1""",
+                           company_filter)
+        else:
+            cursor.execute("""SELECT d.company_code FROM derived_metrics_analysis d
+                             JOIN screener_companies c ON d.company_code = c.company_code
+                             WHERE d.company_name IS NOT NULL AND c.enabled = 1""")
+    except sqlite3.OperationalError as e:
+        logger.error("DB error: %s", e)
+        logger.error("DATABASE_PATH = %s (exists=%s)", DATABASE_PATH, os.path.exists(DATABASE_PATH))
+        conn.close()
+        return
     companies = [row[0] for row in cursor.fetchall()]
 
     logger.info("=" * 100)
@@ -672,7 +700,7 @@ def update_fundamentals_full(force=False, company_filter=None):
     update_prices_quick(force=True, company_filter=company_filter)
 
     # Reconnect for fundamentals
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30)
     cursor = conn.cursor()
 
     # Get exchange rate

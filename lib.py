@@ -121,7 +121,7 @@ def get_database_connection():
     Returns:
         sqlite3.Connection: Database connection object
     """
-    return sqlite3.connect(str(DATABASE_PATH))
+    return sqlite3.connect(str(DATABASE_PATH), timeout=30)
 
 
 # ==============================================================================
@@ -167,6 +167,9 @@ def setup_logger(script_name, log_to_console=True):
         ch.setLevel(logging.INFO)
         ch.setFormatter(formatter)
         logger.addHandler(ch)
+
+    logger.info("BASE_DIR      = %s", Path(__file__).parent.absolute())
+    logger.info("DATABASE_PATH = %s (exists=%s)", DATABASE_PATH, Path(DATABASE_PATH).exists())
 
     return logger
 

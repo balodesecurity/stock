@@ -13,9 +13,9 @@ from pathlib import Path
 # Base directory (stock/ is now the base for scripts)
 BASE_DIR = Path(__file__).parent.absolute()
 
-# Database (inside stock/)
+# Database (outside stock/ git repo, in parent directory)
 DATABASE_NAME = 'derived_metrics_analysis.db'
-DATABASE_PATH = BASE_DIR / DATABASE_NAME
+DATABASE_PATH = BASE_DIR.parent / DATABASE_NAME
 
 # Logs directory (inside stock/)
 LOGS_DIR = BASE_DIR / 'logs'
@@ -115,8 +115,9 @@ MIN_QUARTERS_FOR_PROMOTER_TREND = 2
 # Promoter trend thresholds
 PROMOTER_DECREASE_MAJOR_THRESHOLD = -10  # Percentage
 
-# Yahoo Finance cache: skip companies that failed all ticker resolutions for N days
-YAHOO_FAILED_CACHE_DAYS = 30
+# Yahoo Finance cache: skip companies that failed all ticker resolutions for N days.
+# Kept short (3d) so a transient API outage doesn't lock companies out for weeks.
+YAHOO_FAILED_CACHE_DAYS = 3
 
 
 # ==============================================================================
@@ -178,15 +179,3 @@ SCREENER_BASE_URL = 'https://www.screener.in'
 SCREENER_FILTER_URL = 'https://www.screener.in/screens/3474068/vm/'
 
 
-# ==============================================================================
-# STATIC PORTFOLIO
-# ==============================================================================
-
-# Static list of companies to track (in addition to Screener.in filter)
-# Add company codes here to ensure they are always synced during daily updates
-STATIC_PORTFOLIO = [
-    '531399',  # G G Automotive Gears Ltd (BSE: GGAUTO)
-    'ACE',     # Action Construction Equipment Ltd
-    # Add more company codes below as needed
-    'AMRUTANJAN',
-]

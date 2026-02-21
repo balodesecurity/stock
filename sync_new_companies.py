@@ -18,7 +18,7 @@ from logging.handlers import TimedRotatingFileHandler
 # Add current directory to path to import existing modules
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from screener_downloader import ScreenerDownloader
-from constants import SCREENER_FILTER_URL, STATIC_PORTFOLIO, DATABASE_PATH, QUARTER_ORDER_DESC, LOGS_DIR
+from constants import SCREENER_FILTER_URL, DATABASE_PATH, QUARTER_ORDER_DESC, LOGS_DIR
 
 # Setup logging
 def setup_logging():
@@ -55,6 +55,15 @@ def setup_logging():
     return logger
 
 logger = setup_logging()
+
+def get_static_portfolio():
+    """Fetch company codes from the Static portfolio in the DB."""
+    conn = sqlite3.connect(DATABASE_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT company_code FROM portfolios WHERE portfolio_name = 'Static'")
+    codes = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return codes
 
 def get_companies_from_filter():
     """Fetch company codes from all pages of Screener.in filter"""
@@ -826,10 +835,11 @@ def main():
     logger.info(f"Found {len(filter_companies)} companies in Screener.in filter")
 
     # Get companies from static portfolio
-    logger.info(f"Found {len(STATIC_PORTFOLIO)} companies in static portfolio: {', '.join(STATIC_PORTFOLIO) if STATIC_PORTFOLIO else 'None'}")
+    static_portfolio = get_static_portfolio()
+    logger.info(f"Found {len(static_portfolio)} companies in static portfolio: {', '.join(static_portfolio) if static_portfolio else 'None'}")
 
     # Combine both sources (remove duplicates)
-    all_companies = list(set(filter_companies + STATIC_PORTFOLIO))
+    all_companies = list(set(filter_companies + static_portfolio))
     logger.info(f"Total unique companies from both sources: {len(all_companies)}")
 
     if not all_companies:
@@ -924,8 +934,8 @@ def main():
     portfolio_companies = [row[0] for row in cursor.fetchall()]
     conn.close()
 
-    active_set = set(filter_companies + STATIC_PORTFOLIO + portfolio_companies)
-    logger.info(f"Active companies: {len(active_set)} (filter={len(filter_companies)}, portfolios={len(portfolio_companies)}, static={len(STATIC_PORTFOLIO)})")
+    active_set = set(filter_companies + static_portfolio + portfolio_companies)
+    logger.info(f"Active companies: {len(active_set)} (filter={len(filter_companies)}, portfolios={len(portfolio_companies)}, static={len(static_portfolio)})")
     update_enabled_status(active_set)
 
     logger.info("")
