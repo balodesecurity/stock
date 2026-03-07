@@ -402,28 +402,19 @@ def main():
                 if cursor.fetchone():
                     st.warning(f"{code} is already in the Static Portfolio.")
                 else:
-                    # Check if already exists in DB
-                    conn = get_connection()
-                    cursor = conn.cursor()
-                    cursor.execute(
-                        "SELECT company_code FROM derived_metrics_analysis WHERE company_code = ?",
-                        (code,)
-                    )
-                    if cursor.fetchone():
-                        st.warning(f"{code} already exists in the database.")
+                    ok, msg = add_to_static_portfolio(code)
+                    if ok:
+                        stock_dir = os.path.dirname(os.path.abspath(__file__))
+                        # sync_single_company handles: brand-new (full download), existing-disabled
+                        # (re-enable), or existing-in-other-portfolio (enable + price update).
+                        subprocess.Popen(
+                            [sys.executable, os.path.join(stock_dir, 'sync_new_companies.py'),
+                             '--companies', code],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                        )
+                        st.success(msg + f" Syncing data for {code} in background — refresh in ~60 seconds.")
                     else:
-                        ok, msg = add_to_static_portfolio(code)
-                        if ok:
-                            stock_dir = os.path.dirname(os.path.abspath(__file__))
-                            # Download screener data + live price in one background process
-                            subprocess.Popen(
-                                [sys.executable, os.path.join(stock_dir, 'sync_new_companies.py'),
-                                 '--companies', code],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                            )
-                            st.success(msg + f" Syncing data for {code} in background — refresh in ~60 seconds.")
-                        else:
-                            st.error(msg)
+                        st.error(msg)
 
     # Apply filters
     filtered_df = df.copy()
