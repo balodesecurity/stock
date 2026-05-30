@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Stock Analysis Portal v2 - Bloomberg Terminal Dark Theme
+Stock Analysis Portal - Interactive UI
 Built with Streamlit
 """
 
@@ -8,11 +8,9 @@ import os
 import re
 import subprocess
 import sys
-from datetime import datetime
 import streamlit as st
 import pandas as pd
 import sqlite3
-
 from constants import DATABASE_PATH
 
 # Page configuration
@@ -23,152 +21,33 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Bloomberg Terminal Dark Theme CSS
+# Custom CSS
 st.markdown("""
 <style>
-    /* ===== Google Fonts ===== */
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
-
-    /* ===== Global Font ===== */
-    html, body, [class*="css"], .stMarkdown, .stTextInput, .stSelectbox,
-    .stSlider, .stButton, .stSidebar, .stTabs, .stDataFrame {
-        font-family: 'Inter', sans-serif !important;
+    .main > div {
+        padding-top: 2rem;
     }
-
-    /* ===== Base Layout ===== */
-    .main > div { padding-top: 0.25rem; }
-    .block-container { padding-top: 0.5rem !important; }
-
-    /* ===== Sidebar ===== */
-    section[data-testid="stSidebar"] {
-        background-color: #161b22;
-        border-right: 1px solid #30363d;
+    .stMetric {
+        background-color: #f0f2f6;
+        padding: 10px;
+        border-radius: 5px;
     }
-
-    /* ===== KPI Cards ===== */
-    .kpi-card {
-        background: #161b22;
-        border: 1px solid #30363d;
-        border-top: 3px solid #58a6ff;
-        border-radius: 6px;
-        padding: 14px 16px;
-        margin-bottom: 8px;
-        min-height: 90px;
+    h1 {
+        color: #1f77b4;
     }
-    .kpi-value {
-        font-size: 26px;
-        font-weight: 700;
-        color: #e6edf3;
-        font-family: 'JetBrains Mono', monospace;
-        line-height: 1.2;
-        letter-spacing: -0.5px;
+    .star-rating {
+        font-size: 20px;
     }
-    .kpi-label {
-        font-size: 10px;
-        font-family: 'Inter', sans-serif;
-        font-weight: 600;
-        color: #8b949e;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        margin-top: 4px;
-    }
-    .kpi-sub {
-        font-size: 11px;
-        font-family: 'Inter', sans-serif;
-        color: #58a6ff;
-        margin-top: 2px;
-    }
-
-    /* ===== Company Detail Cards ===== */
-    .detail-card {
-        background: #161b22;
-        border: 1px solid #30363d;
-        border-radius: 6px;
-        padding: 12px 14px;
-    }
-    .detail-card-title {
-        color: #58a6ff;
-        font-size: 10px;
-        font-family: 'Inter', sans-serif;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-        margin-bottom: 8px;
-        padding-bottom: 6px;
-        border-bottom: 1px solid #30363d;
-    }
-    .detail-row {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 3px 0;
-        border-bottom: 1px solid #21262d;
-    }
-    .detail-row:last-child { border-bottom: none; }
-    .detail-label {
-        color: #8b949e;
-        font-size: 11px;
-        font-family: 'Inter', sans-serif;
-        font-weight: 400;
-    }
-    .detail-value {
-        color: #e6edf3;
-        font-size: 12px;
-        font-family: 'JetBrains Mono', monospace;
-        font-weight: 500;
-    }
-    .detail-value.positive { color: #00ff88; }
-    .detail-value.negative { color: #ff4444; }
-    .detail-value.neutral  { color: #f0b429; }
-
-    /* ===== Tabs ===== */
-    .stTabs [data-baseweb="tab-list"] {
-        border-bottom: 2px solid #30363d;
-        gap: 4px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        font-size: 13px;
-        font-family: 'Inter', sans-serif !important;
-        font-weight: 500;
-        padding: 8px 18px;
-    }
-
-    /* ===== Tables ===== */
-    .stDataFrame {
-        border: 1px solid #30363d !important;
-        border-radius: 4px !important;
-    }
-
-    /* ===== Hide Streamlit chrome ===== */
-    #MainMenu { visibility: hidden; }
-    header[data-testid="stHeader"] { display: none; }
-    .stDeployButton { display: none; }
-
-    /* ===== Star Rating ===== */
-    .star-rating { font-size: 18px; }
 </style>
 """, unsafe_allow_html=True)
 
-# ─────────────────────────────────────────────────────────
-# Database & Data Loading (unchanged from v1)
-# ─────────────────────────────────────────────────────────
-
+# Database connection
 @st.cache_resource
 def get_connection():
     conn = sqlite3.connect(str(DATABASE_PATH), check_same_thread=False)
+    # Ensure enabled column exists in screener_companies
     try:
         conn.execute("ALTER TABLE screener_companies ADD COLUMN enabled INTEGER DEFAULT 1")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    try:
-        conn.execute("ALTER TABLE screener_companies ADD COLUMN created_at TIMESTAMP")
-        conn.execute("UPDATE screener_companies SET created_at = last_updated WHERE created_at IS NULL")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass  # Column already exists
-    try:
-        conn.execute("ALTER TABLE screener_companies ADD COLUMN source TEXT DEFAULT 'sync'")
         conn.commit()
     except sqlite3.OperationalError:
         pass  # Column already exists
@@ -238,9 +117,7 @@ def load_data(show_disabled=False):
                  ) as oldest_sales
              )
              WHERE oldest_sales > 0
-            ) as sales_growth_5y,
-            c.created_at,
-            c.source
+            ) as sales_growth_5y
         FROM derived_metrics_analysis d
         JOIN screener_companies c ON d.company_code = c.company_code
         LEFT JOIN (
@@ -259,18 +136,19 @@ def load_data(show_disabled=False):
         query += " AND c.enabled = 1"
     df = pd.read_sql_query(query, conn)
 
+    # Fill NULL promoter_trend_display with "N/A"
     df['promoter_trend_display'] = df['promoter_trend_display'].fillna("N/A")
+
+    # Calculate derived columns
     df['avg_3yr_growth'] = (df['year1_sales_growth'] + df['year2_sales_growth'] + df['year3_sales_growth']) / 3
+    # Calculate price change %
     df['price_change_pct'] = df.apply(
         lambda x: ((x['current_price'] - x['previous_close']) / x['previous_close'] * 100)
         if pd.notna(x['current_price']) and pd.notna(x['previous_close']) and x['previous_close'] > 0
         else None, axis=1
     )
-    return df
 
-# ─────────────────────────────────────────────────────────
-# Formatting helpers (unchanged from v1)
-# ─────────────────────────────────────────────────────────
+    return df
 
 def render_stars(rating):
     """Render star rating as emoji"""
@@ -295,6 +173,7 @@ def format_price(price, change_pct, updated_at=None):
     if pd.isna(price):
         return "N/A"
 
+    # Format timestamp in IST
     time_str = ""
     if pd.notna(updated_at):
         try:
@@ -306,6 +185,7 @@ def format_price(price, change_pct, updated_at=None):
             else:
                 dt = updated_at
 
+            # Convert to IST if not already
             ist = pytz.timezone('Asia/Kolkata')
             if dt.tzinfo is None:
                 dt = ist.localize(dt)
@@ -378,6 +258,7 @@ def delete_company(company_code):
     except Exception as e:
         return False, f"Failed to delete {company_code}: {e}"
 
+
 def add_to_static_portfolio(company_code):
     """Insert a company code into the Static portfolio in the DB. Returns (success, message)."""
     conn = get_connection()
@@ -392,210 +273,28 @@ def add_to_static_portfolio(company_code):
         return False, f"Failed to add {company_code}: {e}"
 
 
-# ─────────────────────────────────────────────────────────
-# NEW: Bloomberg UI helpers
-# ─────────────────────────────────────────────────────────
-
-
-def render_kpi_cards(df: pd.DataFrame, filtered_df: pd.DataFrame):
-    """Render 5 Bloomberg-style KPI cards above the table."""
-    total    = len(df)
-    filtered = len(filtered_df)
-
-    positive_fcf   = int((filtered_df['fcf_category'] == 'Positive').sum())
-    avg_ssgr_val   = filtered_df['ssgr'].dropna().mean()
-    high_sentiment = int(((filtered_df['sentiment_rating'] >= 4) & filtered_df['sentiment_rating'].notna()).sum())
-    roce_20        = int(((filtered_df['roce'] >= 20) & filtered_df['roce'].notna()).sum())
-
-    pct_fcf        = f"{positive_fcf / filtered * 100:.0f}% of view" if filtered > 0 else "—"
-    avg_ssgr_str   = f"{avg_ssgr_val:.1f}%" if pd.notna(avg_ssgr_val) else "N/A"
-
-    accent = ["#58a6ff", "#00ff88", "#f0b429", "#a371f7", "#00ff88"]
-    cards = [
-        ("COMPANIES",      f"{filtered}",       f"of {total} total",         accent[0]),
-        ("POSITIVE FCF",   str(positive_fcf),    pct_fcf,                     accent[1]),
-        ("AVG SSGR",       avg_ssgr_str,         "Self-Sustainable Growth",   accent[2]),
-        ("HIGH SENTIMENT", str(high_sentiment),  "Rating ≥ 4 stars",          accent[3]),
-        ("ROCE ≥ 20%",     str(roce_20),         "Quality companies",         accent[4]),
-    ]
-
-    cols = st.columns(5)
-    for col, (label, value, sub, color) in zip(cols, cards):
-        with col:
-            st.markdown(
-                f'<div class="kpi-card" style="border-top-color:{color}">'
-                f'<div class="kpi-value">{value}</div>'
-                f'<div class="kpi-label">{label}</div>'
-                f'<div class="kpi-sub" style="color:{color}">{sub}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-
-
-def _vrow(label: str, formatted: str, css_class: str = "") -> str:
-    """Generate a single detail-card row."""
-    cls = f"detail-value {css_class}".strip()
-    return (
-        f'<div class="detail-row">'
-        f'<span class="detail-label">{label}</span>'
-        f'<span class="{cls}">{formatted}</span>'
-        f'</div>'
-    )
-
-
-def render_company_detail(filtered_df: pd.DataFrame):
-    """Render company detail panel below the Screener table."""
-    options = ["— select company —"] + [
-        f"{r['company_code']} – {r['company_name']}"
-        for _, r in filtered_df[['company_code', 'company_name']].drop_duplicates('company_code').iterrows()
-    ]
-    selected = st.selectbox("🔍 Company Detail", options, key="cmp_detail_select")
-    if selected == "— select company —":
-        return
-
-    code = selected.split(" – ")[0]
-    matches = filtered_df[filtered_df['company_code'] == code]
-    if matches.empty:
-        st.warning("Company not found in filtered data.")
-        return
-    row = matches.iloc[0]
-
-    st.markdown(f"#### {row['company_name']}  `{code}`")
-    c1, c2, c3, c4 = st.columns(4)
-
-    # ── Col 1: Price ──
-    cmp_str = f"₹{row['current_price']:.2f}" if pd.notna(row['current_price']) else "N/A"
-    chg_pct = row.get('price_change_pct')
-    chg_str = f"{chg_pct:+.2f}%" if pd.notna(chg_pct) else "N/A"
-    chg_cls = ("positive" if chg_pct >= 0 else "negative") if pd.notna(chg_pct) else ""
-    w52h    = f"₹{row['week_52_high']:.0f}" if pd.notna(row['week_52_high']) else "N/A"
-    w52l    = f"₹{row['week_52_low']:.0f}"  if pd.notna(row['week_52_low'])  else "N/A"
-    vol_str = f"{int(row['volume']):,}"      if pd.notna(row.get('volume'))   else "N/A"
-
-    with c1:
-        st.markdown(
-            f'<div class="detail-card">'
-            f'<div class="detail-card-title">Price</div>'
-            f'{_vrow("CMP", cmp_str)}'
-            f'{_vrow("Change", chg_str, chg_cls)}'
-            f'{_vrow("52W High", w52h)}'
-            f'{_vrow("52W Low", w52l)}'
-            f'{_vrow("Volume", vol_str)}'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-
-    # ── Col 2: Growth ──
-    def fmt_growth(val):
-        if pd.isna(val):
-            return "N/A", ""
-        return f"{val:+.1f}%", "positive" if val >= 0 else "negative"
-
-    qoq_s,  qoq_c  = fmt_growth(row.get('qoq_profit_growth'))
-    yoyp_s, yoyp_c = fmt_growth(row.get('yoy_profit_growth'))
-    yoys_s, yoys_c = fmt_growth(row.get('yoy_sales_growth'))
-    cagr_s, cagr_c = fmt_growth(row.get('sales_growth_5y'))
-    lq = row.get('latest_quarter', 'N/A') or 'N/A'
-
-    with c2:
-        st.markdown(
-            f'<div class="detail-card">'
-            f'<div class="detail-card-title">Growth</div>'
-            f'{_vrow("QoQ Profit", qoq_s, qoq_c)}'
-            f'{_vrow("YoY Profit", yoyp_s, yoyp_c)}'
-            f'{_vrow("YoY Sales", yoys_s, yoys_c)}'
-            f'{_vrow("5Y CAGR", cagr_s, cagr_c)}'
-            f'{_vrow("Latest Q", lq)}'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-
-    # ── Col 3: Quality ──
-    def fmt_ssgr(val):
-        if pd.isna(val):
-            return "N/A", ""
-        return f"{val:.1f}%", "positive" if val > 0 else "negative"
-
-    ssgr_s,      ssgr_c      = fmt_ssgr(row.get('ssgr'))
-    ssgr_prev_s, ssgr_prev_c = fmt_ssgr(row.get('ssgr_prev'))
-
-    roce_val = row.get('roce')
-    roce_s = f"{roce_val:.1f}%" if pd.notna(roce_val) else "N/A"
-    roce_c = (
-        "positive" if pd.notna(roce_val) and roce_val >= 20 else
-        "neutral"  if pd.notna(roce_val) and roce_val >= 15 else
-        "negative" if pd.notna(roce_val) else ""
-    )
-
-    fcf_cfo_val = row.get('fcf_cfo_ratio')
-    fcf_s = f"{fcf_cfo_val:.1f}%" if pd.notna(fcf_cfo_val) else "N/A"
-    fcf_c = (
-        "positive" if pd.notna(fcf_cfo_val) and fcf_cfo_val >= 25 else
-        "negative" if pd.notna(fcf_cfo_val) else ""
-    )
-    fcf_cat = row.get('fcf_category', 'N/A') or 'N/A'
-
-    with c3:
-        st.markdown(
-            f'<div class="detail-card">'
-            f'<div class="detail-card-title">Quality</div>'
-            f'{_vrow("SSGR", ssgr_s, ssgr_c)}'
-            f'{_vrow("SSGR Prev", ssgr_prev_s, ssgr_prev_c)}'
-            f'{_vrow("ROCE", roce_s, roce_c)}'
-            f'{_vrow("FCF/CFO", fcf_s, fcf_c)}'
-            f'{_vrow("FCF Category", fcf_cat)}'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-
-    # ── Col 4: Valuation & Promoter ──
-    pe_val  = row.get('pe_ratio')
-    bv      = row.get('book_value')
-    cmp_raw = row.get('current_price')
-    pb_val  = (cmp_raw / bv) if pd.notna(cmp_raw) and pd.notna(bv) and bv > 0 else None
-    peg_val = row.get('peg_ratio')
-    promo   = row.get('promoter_holding')
-    trend   = row.get('promoter_trend_display', 'N/A') or 'N/A'
-
-    pe_s    = f"{pe_val:.1f}x"  if pd.notna(pe_val)  else "N/A"
-    pb_s    = f"{pb_val:.1f}x"  if pd.notna(pb_val)  else "N/A"
-    peg_s   = f"{peg_val:.2f}"  if pd.notna(peg_val) else "N/A"
-    promo_s = f"{promo:.1f}%"   if pd.notna(promo)   else "N/A"
-
-    with c4:
-        st.markdown(
-            f'<div class="detail-card">'
-            f'<div class="detail-card-title">Valuation &amp; Promoter</div>'
-            f'{_vrow("P/E", pe_s)}'
-            f'{_vrow("P/B", pb_s)}'
-            f'{_vrow("PEG", peg_s)}'
-            f'{_vrow("Promoter %", promo_s)}'
-            f'{_vrow("Trend", trend)}'
-            f'</div>',
-            unsafe_allow_html=True,
-        )
-
-
-
-
-# ─────────────────────────────────────────────────────────
 # Main app
-# ─────────────────────────────────────────────────────────
-
 def main():
-    st.markdown("## 📈 Stock Analysis Portal")
-    st.caption("**Base Filter:** Queries https://www.screener.in/screens/3474068/vm/ — filters entire NSE/BSE universe down to a smaller set of quality companies using basic Sales Growth, Debt/Equity, Promoter Holding, and other criteria.")
+    # Compact header with refresh button
+    col_title, col_refresh = st.columns([6, 1])
+    with col_title:
+        st.markdown("## 📈 Stock Analysis Portal")
+        st.caption("**Base Filter:** Interest Coverage > 3 • Sales Growth (10Y median) > 15% • Debt/Equity < 0.5 • Current Ratio > 1.25 • Net Cash Flow (LY) > 0 • Promoter Holding > 51% • FCF/CFO (3Y) > 1 • Market Cap > ₹10 Cr")
+    with col_refresh:
+        if st.button("🔄 Refresh"):
+            st.cache_data.clear()
 
     # Sidebar filters
     st.sidebar.header("🔍 Filters")
 
-    show_disabled = st.sidebar.checkbox(
-        "Show disabled companies", value=False,
-        help="Show companies no longer in the screener filter, portfolios, or static list"
-    )
+    # Show disabled companies toggle
+    show_disabled = st.sidebar.checkbox("Show disabled companies", value=False,
+        help="Show companies no longer in the screener filter, portfolios, or static list")
 
+    # Load data
     df = load_data(show_disabled=show_disabled)
 
+    # Portfolio filter (dropdown)
     portfolio_filter = st.sidebar.selectbox(
         "💼 Portfolio Filter",
         options=["All Companies", "Amit's Portfolio", "Static Portfolio"],
@@ -603,6 +302,7 @@ def main():
         help="Filter by portfolio: All Companies, Amit's Portfolio (Paytmmoney), or Static Portfolio (custom watchlist)"
     )
 
+    # Get portfolio company codes based on selection
     portfolio_codes = []
     if portfolio_filter == "Amit's Portfolio":
         conn = get_connection()
@@ -617,6 +317,7 @@ def main():
 
     st.sidebar.markdown("---")
 
+    # Search filter
     search_query = st.sidebar.text_input(
         "🔎 Search Company",
         placeholder="Type company name or code...",
@@ -625,52 +326,55 @@ def main():
 
     st.sidebar.markdown("---")
 
-    quick_filter = st.sidebar.checkbox(
-        "⚡ Filter for Growth & Quality",
-        value=False,
-        help="Preset: Sentiment ≥ 1 • P/E ≤ 105 • D/E ≤ 1.0 • 5Y CAGR ≥ 20% • Promoter ≥ 40% • FCF/CFO ≥ 10%"
-    )
-    # Use a key suffix so sliders fully reset when quick filter is toggled
-    _qk = "qf" if quick_filter else "nqf"
+    # Adjust defaults based on portfolio filter
+    default_max_pe = 5000 if portfolio_filter != "All Companies" else 100
+    default_max_debt = 5.0 if portfolio_filter != "All Companies" else 1.0
 
-    default_max_pe   = 5000 if portfolio_filter != "All Companies" else 100
-    default_max_debt = 5.0  if portfolio_filter != "All Companies" else 1.0
+    # Sentiment filter
+    min_sentiment = st.sidebar.slider("Minimum Sentiment", 0, 5, 0)
 
-    min_sentiment = st.sidebar.slider("Minimum Sentiment", 0, 5,
-        1 if quick_filter else 0, key=f"sentiment_{_qk}")
-    max_pe        = st.sidebar.slider("Maximum P/E Ratio", 0, 5000,
-        105 if quick_filter else default_max_pe, key=f"max_pe_{_qk}")
+    # P/E filter
+    max_pe = st.sidebar.slider("Maximum P/E Ratio", 0, 5000, default_max_pe)
 
-    industries        = ['All'] + sorted(df['industry'].dropna().unique().tolist())
+    # Industry filter
+    industries = ['All'] + sorted(df['industry'].dropna().unique().tolist())
     selected_industry = st.sidebar.selectbox("Industry", industries)
 
-    max_debt          = st.sidebar.slider("Maximum Debt/Equity", 0.0, 5.0,
-        1.0 if quick_filter else default_max_debt, key=f"max_debt_{_qk}")
+    # Debt filter
+    max_debt = st.sidebar.slider("Maximum Debt/Equity", 0.0, 5.0, default_max_debt)
 
-    market_cap_range  = st.sidebar.slider(
+    # Market cap filter (range slider in Crores)
+    market_cap_range = st.sidebar.slider(
         "Market Cap Range (₹ Cr)",
-        min_value=0, max_value=500000, value=(0, 500000), step=1000, format="₹%d Cr"
+        min_value=0,
+        max_value=500000,
+        value=(0, 500000),
+        step=1000,
+        format="₹%d Cr"
     )
 
+    # 5-Year Sales Growth CAGR filter
     min_sales_growth_5y = st.sidebar.number_input(
-        "Min Sales Growth 5Y CAGR (%)", min_value=0, max_value=100,
-        value=20 if quick_filter else 0, step=1,
-        help="Minimum 5-year sales CAGR. Companies with less than 6 years of data are excluded.",
-        key=f"cagr_{_qk}"
+        "Min Sales Growth 5Y CAGR (%)",
+        min_value=0,
+        max_value=100,
+        value=0,
+        step=1,
+        help="Minimum 5-year sales CAGR (Compound Annual Growth Rate). Companies with less than 6 years of data are excluded."
     )
 
+    # Promoter Holding filter
     min_promoter = st.sidebar.slider(
-        "Min Promoter Holding (%)", 0.0, 100.0,
-        40.0 if quick_filter else 0.0, step=5.0,
-        help="Minimum promoter holding percentage. Companies without promoter data are included.",
-        key=f"promoter_{_qk}"
+        "Min Promoter Holding (%)",
+        0.0, 100.0, 0.0, step=5.0,
+        help="Minimum promoter holding percentage. Companies without promoter data are included."
     )
 
+    # FCF/CFO Ratio filter
     min_fcf_cfo = st.sidebar.slider(
-        "Min FCF/CFO Ratio (%)", -100, 100,
-        10 if quick_filter else 0, step=5,
-        help="Minimum Free Cash Flow / Cash from Operations ratio. Green threshold is 25%.",
-        key=f"fcf_cfo_{_qk}"
+        "Min FCF/CFO Ratio (%)",
+        -100, 100, 0, step=5,
+        help="Minimum Free Cash Flow / Cash from Operations ratio. Green threshold is 25%."
     )
 
     # Add Stock to Static Portfolio
@@ -688,6 +392,7 @@ def main():
             if err:
                 st.error(err)
             else:
+                # Check if already in Static Portfolio (DB)
                 conn = get_connection()
                 cursor = conn.cursor()
                 cursor.execute(
@@ -700,6 +405,8 @@ def main():
                     ok, msg = add_to_static_portfolio(code)
                     if ok:
                         stock_dir = os.path.dirname(os.path.abspath(__file__))
+                        # sync_single_company handles: brand-new (full download), existing-disabled
+                        # (re-enable), or existing-in-other-portfolio (enable + price update).
                         subprocess.Popen(
                             [sys.executable, os.path.join(stock_dir, 'sync_new_companies.py'),
                              '--companies', code],
@@ -709,23 +416,24 @@ def main():
                     else:
                         st.error(msg)
 
-    # ── Apply filters ──
+    # Apply filters
     filtered_df = df.copy()
 
+    # Search filter (applied first for better performance)
     if search_query:
-        sq = search_query.lower()
+        search_query_lower = search_query.lower()
         filtered_df = filtered_df[
-            filtered_df['company_name'].str.lower().str.contains(sq, na=False) |
-            filtered_df['company_code'].str.lower().str.contains(sq, na=False)
+            (filtered_df['company_name'].str.lower().str.contains(search_query_lower, na=False)) |
+            (filtered_df['company_code'].str.lower().str.contains(search_query_lower, na=False))
         ]
 
+    # Portfolio filter
     if portfolio_filter != "All Companies" and portfolio_codes:
         filtered_df = filtered_df[filtered_df['company_code'].isin(portfolio_codes)]
 
+    # Sentiment filter (handle NULL)
     if min_sentiment > 0:
-        filtered_df = filtered_df[
-            (filtered_df['sentiment_rating'] >= min_sentiment) | (filtered_df['sentiment_rating'].isna())
-        ]
+        filtered_df = filtered_df[(filtered_df['sentiment_rating'] >= min_sentiment) | (filtered_df['sentiment_rating'].isna())]
 
     if max_pe > 0:
         filtered_df = filtered_df[
@@ -740,6 +448,7 @@ def main():
     if selected_industry != 'All':
         filtered_df = filtered_df[filtered_df['industry'] == selected_industry]
 
+    # Market cap filter (range slider)
     min_cap, max_cap = market_cap_range
     if min_cap > 0 or max_cap < 500000:
         filtered_df = filtered_df[
@@ -747,194 +456,193 @@ def main():
             (filtered_df['market_cap'].isna())
         ]
 
+    # 5-Year Sales Growth filter
     if min_sales_growth_5y > 0:
         filtered_df = filtered_df[
-            filtered_df['sales_growth_5y'].notna() & (filtered_df['sales_growth_5y'] >= min_sales_growth_5y)
+            (filtered_df['sales_growth_5y'].notna()) & (filtered_df['sales_growth_5y'] >= min_sales_growth_5y)
         ]
 
+    # Promoter Holding filter
     if min_promoter > 0:
         filtered_df = filtered_df[
             (filtered_df['promoter_holding'] >= min_promoter) | (filtered_df['promoter_holding'].isna())
         ]
 
+    # FCF/CFO Ratio filter
     if min_fcf_cfo != 0:
         filtered_df = filtered_df[
             (filtered_df['fcf_cfo_ratio'] >= min_fcf_cfo) | (filtered_df['fcf_cfo_ratio'].isna())
         ]
 
-    # Green score sorting
-    filtered_df = filtered_df.copy()
-    filtered_df['fcf_green']       = (filtered_df['fcf_cfo_ratio'] >= 25).astype(int)
-    filtered_df['ssgr_green']      = (filtered_df['ssgr'] > 0).astype(int)
-    filtered_df['qoq_green']       = (filtered_df['qoq_profit_growth'] > 0).astype(int)
-    filtered_df['yoy_green']       = (filtered_df['yoy_profit_growth'] > 0).astype(int)
+    # Create green indicator columns for sorting
+    filtered_df['fcf_green'] = (filtered_df['fcf_cfo_ratio'] >= 25).astype(int)
+    filtered_df['ssgr_green'] = (filtered_df['ssgr'] > 0).astype(int)
+    filtered_df['qoq_green'] = (filtered_df['qoq_profit_growth'] > 0).astype(int)
+    filtered_df['yoy_green'] = (filtered_df['yoy_profit_growth'] > 0).astype(int)
     filtered_df['yoy_sales_green'] = (filtered_df['yoy_sales_growth'] > 0).astype(int)
-    filtered_df['green_score']     = (
-        filtered_df['fcf_green'] + filtered_df['ssgr_green'] + filtered_df['qoq_green'] +
-        filtered_df['yoy_green'] + filtered_df['yoy_sales_green']
+
+    # Create composite green score (0-5)
+    filtered_df['green_score'] = (
+        filtered_df['fcf_green'] +
+        filtered_df['ssgr_green'] +
+        filtered_df['qoq_green'] +
+        filtered_df['yoy_green'] +
+        filtered_df['yoy_sales_green']
     )
+
+    # Sort by green score first, then by individual metrics
     filtered_df = filtered_df.sort_values(
         by=['green_score', 'fcf_cfo_ratio', 'ssgr', 'qoq_profit_growth', 'yoy_profit_growth', 'yoy_sales_growth'],
         ascending=[False, False, False, False, False, False],
         na_position='last'
     )
 
-    # ── Tabs ──
-    tab1, tab3 = st.tabs(["📊 Screener", "📚 Documentation"])
+    # Tabs
+    tab1, tab4 = st.tabs(["📊 Stock List", "📖 Documentation"])
 
-    # ─────────────────────────────────────────────────────
-    # Tab 1: Screener
-    # ─────────────────────────────────────────────────────
     with tab1:
-        render_kpi_cards(df, filtered_df)
-
         st.subheader(f"Filtered Stocks ({len(filtered_df)} companies)")
 
+        # Show portfolio filter indicator if active
         if portfolio_filter == "Amit's Portfolio":
             st.info(f"💼 Showing **Amit's Portfolio** companies ({len(filtered_df)} companies)")
         elif portfolio_filter == "Static Portfolio":
             st.info(f"⭐ Showing **Static Portfolio** companies ({len(filtered_df)} companies)")
 
+        # Show search indicator if active
         if search_query:
             st.info(f"🔎 Showing results for: **{search_query}** ({len(filtered_df)} matches)")
 
-        # Build display DataFrame
+        # Display table
         display_df = filtered_df[[
             'company_code', 'company_name', 'sector', 'industry',
             'current_price', 'price_change_pct', 'updated_at', 'week_52_high', 'week_52_low',
             'sentiment_rating', 'pe_ratio', 'book_value', 'peg_ratio', 'roce', 'market_cap', 'sales_growth_5y',
             'ssgr', 'ssgr_prev', 'year1_sales_growth', 'year2_sales_growth',
-            'qoq_profit_growth', 'qoq_profit_growth_prev', 'yoy_profit_growth', 'yoy_sales_growth',
-            'latest_quarter', 'prev_quarter',
+            'qoq_profit_growth', 'qoq_profit_growth_prev', 'yoy_profit_growth', 'yoy_sales_growth', 'latest_quarter', 'prev_quarter',
             'promoter_trend_display',
             'npm', 'total_fcf', 'fcf_cfo_ratio', 'debt_to_equity',
-            'created_at', 'source',
         ]].copy().reset_index(drop=True)
 
-        # Compute "new company" flag (added within last 7 days)
-        _now = datetime.now()
-        created_dt = pd.to_datetime(display_df['created_at'], errors='coerce', format='mixed')
-        display_df['is_new'] = (
-            created_dt.notna() &
-            ((_now - created_dt).dt.total_seconds() <= 7 * 24 * 3600)
-        )
-        display_df['First Added'] = created_dt.apply(
-            lambda x: x.strftime('%d %b %Y') if pd.notna(x) else 'N/A'
-        )
-        display_df['company_name'] = display_df.apply(
-            lambda r: f"🆕 {r['company_name']}" if r['is_new'] else r['company_name'], axis=1
-        )
-        display_df['Source'] = display_df['source'].apply(
-            lambda x: 'MANUAL' if x == 'manual' else 'SYNC'
-        )
-
-        # Capture new company info before display_df is slimmed
-        _new_count = int(display_df['is_new'].sum())
-        _new_names = (
-            display_df[display_df['is_new']]['company_name']
-            .str.replace('🆕 ', '', regex=False).tolist()
-        )
-
+        # Capture company codes before URL conversion (used for delete)
         company_codes = display_df['company_code'].tolist()
 
-        display_df['cmp'] = display_df.apply(
-            lambda x: format_price(x['current_price'], x['price_change_pct'], x['updated_at']), axis=1
-        )
+        # Format columns
+        display_df['cmp'] = display_df.apply(lambda x: format_price(x['current_price'], x['price_change_pct'], x['updated_at']), axis=1)
         display_df['52w_range'] = display_df.apply(
             lambda x: f"₹{x['week_52_high']:.0f} / {x['week_52_low']:.0f}"
             if pd.notna(x['week_52_high']) and pd.notna(x['week_52_low']) else "N/A", axis=1
         )
         display_df['sentiment_rating'] = display_df['sentiment_rating'].apply(render_stars)
-        display_df['pe_ratio']         = display_df['pe_ratio'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "N/A")
-        display_df['pb_ratio']         = display_df.apply(
+        display_df['pe_ratio'] = display_df['pe_ratio'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "N/A")
+
+        # Calculate P/B ratio (Price / Book Value)
+        display_df['pb_ratio'] = display_df.apply(
             lambda x: round(x['current_price'] / x['book_value'], 2)
             if pd.notna(x['current_price']) and pd.notna(x['book_value']) and x['book_value'] > 0
             else None, axis=1
         )
-        display_df['pb_ratio']         = display_df['pb_ratio'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "N/A")
-        display_df['peg_ratio']        = display_df['peg_ratio'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
+        display_df['pb_ratio'] = display_df['pb_ratio'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "N/A")
 
+        display_df['peg_ratio'] = display_df['peg_ratio'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
+
+        # Format ROCE with color indicator
         def format_roce(val):
-            if pd.isna(val): return "N/A"
-            emoji = "🟢" if val >= 20 else ("🟡" if val >= 15 else "🔴")
+            if pd.isna(val):
+                return "N/A"
+            if val >= 20:
+                emoji = "🟢"
+            elif val >= 15:
+                emoji = "🟡"
+            else:
+                emoji = "🔴"
             return f"{emoji} {val:.1f}%"
 
-        display_df['roce']             = display_df['roce'].apply(format_roce)
-        display_df['market_cap']       = display_df['market_cap'].apply(lambda x: f"₹{x:.0f}" if pd.notna(x) else "N/A")
-        display_df['sales_growth_5y']  = display_df['sales_growth_5y'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
+        display_df['roce'] = display_df['roce'].apply(format_roce)
+        display_df['market_cap'] = display_df['market_cap'].apply(lambda x: f"₹{x:.0f}" if pd.notna(x) else "N/A")
+        display_df['sales_growth_5y'] = display_df['sales_growth_5y'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
 
+        # Format SSGR with color indicator
         def format_ssgr(val):
-            if pd.isna(val): return "N/A"
+            if pd.isna(val):
+                return "N/A"
             emoji = "🟢" if val > 0 else "🔴"
             return f"{emoji} {val:.1f}%"
 
-        display_df['ssgr']               = display_df['ssgr'].apply(format_ssgr)
-        display_df['ssgr_prev']          = display_df['ssgr_prev'].apply(format_ssgr)
+        display_df['ssgr'] = display_df['ssgr'].apply(format_ssgr)
+        display_df['ssgr_prev'] = display_df['ssgr_prev'].apply(format_ssgr)
         display_df['year1_sales_growth'] = display_df['year1_sales_growth'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
         display_df['year2_sales_growth'] = display_df['year2_sales_growth'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
-        display_df['npm']                = display_df['npm'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
+        display_df['npm'] = display_df['npm'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
 
+        # Format Q-o-Q profit with color indicator and quarter label
         def format_qoq_with_quarter(row, val_col, quarter_col):
-            val     = row[val_col]
+            val = row[val_col]
             quarter = row[quarter_col]
-            if pd.isna(val): return "N/A"
+            if pd.isna(val):
+                return "N/A"
             emoji = "🟢" if val >= 0 else "🔴"
-            q_str = quarter.replace(' ', '-') if isinstance(quarter, str) else "?"
+            q_str = quarter if pd.notna(quarter) else "?"
+            # Convert "Sep 2025" to "Sep-2025"
+            q_str = q_str.replace(' ', '-') if isinstance(q_str, str) else q_str
             return f"{emoji} {val:.1f}%, {q_str}"
 
-        display_df['qoq_profit_growth']      = display_df.apply(
-            lambda r: format_qoq_with_quarter(r, 'qoq_profit_growth', 'latest_quarter'), axis=1
-        )
-        display_df['qoq_profit_growth_prev'] = display_df.apply(
-            lambda r: format_qoq_with_quarter(r, 'qoq_profit_growth_prev', 'prev_quarter'), axis=1
-        )
-        display_df['yoy_profit_growth'] = display_df['yoy_profit_growth'].apply(
-            lambda x: f"{'🟢' if x >= 0 else '🔴'} {x:.1f}%" if pd.notna(x) else "N/A"
-        )
-        display_df['yoy_sales_growth']  = display_df['yoy_sales_growth'].apply(
-            lambda x: f"{'🟢' if x >= 0 else '🔴'} {x:.1f}%" if pd.notna(x) else "N/A"
-        )
-        display_df['total_fcf']         = display_df['total_fcf'].apply(format_number)
+        # Format Y-o-Y profit with color indicator
+        def format_yoy_profit(val):
+            if pd.isna(val):
+                return "N/A"
+            emoji = "🟢" if val >= 0 else "🔴"
+            return f"{emoji} {val:.1f}%"
 
+        # Format Y-o-Y sales with color indicator
+        def format_yoy_sales(val):
+            if pd.isna(val):
+                return "N/A"
+            emoji = "🟢" if val >= 0 else "🔴"
+            return f"{emoji} {val:.1f}%"
+
+        display_df['qoq_profit_growth'] = display_df.apply(lambda r: format_qoq_with_quarter(r, 'qoq_profit_growth', 'latest_quarter'), axis=1)
+        display_df['qoq_profit_growth_prev'] = display_df.apply(lambda r: format_qoq_with_quarter(r, 'qoq_profit_growth_prev', 'prev_quarter'), axis=1)
+        display_df['yoy_profit_growth'] = display_df['yoy_profit_growth'].apply(format_yoy_profit)
+        display_df['yoy_sales_growth'] = display_df['yoy_sales_growth'].apply(format_yoy_sales)
+        display_df['total_fcf'] = display_df['total_fcf'].apply(format_number)
+
+        # Format FCF/CFO with color indicator
         def format_fcf_cfo(val):
-            if pd.isna(val): return "N/A"
+            if pd.isna(val):
+                return "N/A"
             emoji = "🟢" if val >= 25 else "🔴"
             return f"{emoji} {val:.1f}%"
 
-        display_df['fcf_cfo_ratio']  = display_df['fcf_cfo_ratio'].apply(format_fcf_cfo)
+        display_df['fcf_cfo_ratio'] = display_df['fcf_cfo_ratio'].apply(format_fcf_cfo)
         display_df['debt_to_equity'] = display_df['debt_to_equity'].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "N/A")
 
+        # Create screener.in links with company code as URL
         display_df['company_code'] = display_df['company_code'].apply(
             lambda x: f"https://www.screener.in/company/{x}/" if pd.notna(x) else ""
         )
 
+        # Select and order columns for display
         display_df = display_df[[
             'company_code', 'company_name', 'sector', 'industry', 'cmp', '52w_range',
-            'sales_growth_5y', 'sentiment_rating', 'Source', 'pe_ratio', 'pb_ratio', 'peg_ratio', 'roce',
-            'fcf_cfo_ratio', 'ssgr', 'ssgr_prev', 'qoq_profit_growth', 'qoq_profit_growth_prev',
-            'yoy_profit_growth', 'yoy_sales_growth',
+            'sentiment_rating', 'pe_ratio', 'pb_ratio', 'peg_ratio', 'roce',
+            'fcf_cfo_ratio', 'ssgr', 'ssgr_prev', 'qoq_profit_growth', 'qoq_profit_growth_prev', 'yoy_profit_growth', 'yoy_sales_growth',
             'promoter_trend_display',
-            'market_cap', 'npm',
+            'market_cap', 'sales_growth_5y', 'npm',
             'total_fcf', 'debt_to_equity',
-            'First Added',
         ]]
 
+        # Rename columns
         display_df.columns = [
             'Code', 'Company', 'Sector', 'Industry', 'CMP', '52W High/Low',
-            '5Y CAGR', 'Sentiment', 'Source', 'P/E', 'P/B', 'PEG', 'ROCE',
+            'Sentiment', 'P/E', 'P/B', 'PEG', 'ROCE',
             'FCF/CFO', 'SSGR', 'SSGR (Prev)', 'QoQ Profit', 'Prev QoQ', 'Y-o-Y Profit', 'Y-o-Y Sales',
             'Promoter Holding',
-            'Market Cap (Cr)', 'NPM %',
+            'Market Cap (Cr)', '5Y CAGR', 'NPM %',
             'FCF (10Y)', 'D/E',
-            'First Added',
         ]
 
-        if _new_count > 0:
-            st.success(
-                f"🆕 **{_new_count} new {'company' if _new_count == 1 else 'companies'} "
-                f"added in the last 7 days:** {', '.join(_new_names)}"
-            )
-
+        # Add delete checkbox column at the front
         display_df.insert(0, '🗑️', False)
 
         edited_df = st.data_editor(
@@ -954,83 +662,75 @@ def main():
                     display_text="https://www.screener.in/company/(.*?)/",
                     width=80
                 ),
-                "First Added": st.column_config.TextColumn(
-                    "First Added",
-                    help="Date when company was first added to the database. 🆕 in Company name = added within last 7 days.",
-                    width="small"
-                ),
-                "Source": st.column_config.TextColumn(
-                    "Source",
-                    help="SYNC = added via screener filter job | MANUAL = manually added via Add Stock form",
-                    width="small"
-                ),
                 "CMP": st.column_config.TextColumn(
                     "CMP",
-                    help="Current Market Price with change percentage. Timestamp shows last Yahoo Finance update (IST).",
+                    help="Current Market Price with change percentage. Timestamp in square brackets shows when price was last updated from Yahoo Finance (IST).",
                     width=200
                 ),
                 "Sentiment": st.column_config.TextColumn(
                     "Sentiment",
-                    help="Market sentiment based on price position in 52-week range: ⭐⭐⭐⭐⭐ (80-100%) | ⭐⭐⭐⭐ (60-80%) | ⭐⭐⭐ (40-60%) | ⭐⭐ (20-40%) | ⭐ (0-20%)",
+                    help="Market sentiment based on price position in 52-week range: ⭐⭐⭐⭐⭐ (80-100% - Very Bullish, near 52W high) | ⭐⭐⭐⭐ (60-80% - Bullish) | ⭐⭐⭐ (40-60% - Neutral) | ⭐⭐ (20-40% - Bearish) | ⭐ (0-20% - Very Bearish, near 52W low)",
                     width="small"
                 ),
                 "P/B": st.column_config.TextColumn(
                     "P/B",
-                    help="Price to Book Value ratio (CMP / Book Value per share).",
+                    help="Price to Book Value ratio (CMP / Book Value per share). Lower P/B may indicate undervaluation.",
                     width="small"
                 ),
                 "ROCE": st.column_config.TextColumn(
                     "ROCE",
-                    help="Return on Capital Employed. 🟢 ≥20% (Excellent) | 🟡 15-20% (Good) | 🔴 <15% (Poor)",
+                    help="Return on Capital Employed. 🟢 Green: ≥20% (Excellent) | 🟡 Yellow: 15-20% (Good) | 🔴 Red: <15% (Poor)",
                     width="small"
                 ),
                 "FCF/CFO": st.column_config.TextColumn(
                     "FCF/CFO",
-                    help="Free Cash Flow / Cash from Operations. 🟢 ≥25% (Low capex) | 🔴 <25% (High capex)",
+                    help="Free Cash Flow / Cash from Operations ratio. 🟢 Green: ≥25% (Low capex, cash cow) | 🔴 Red: <25% (High capex)",
                     width="small"
                 ),
                 "SSGR": st.column_config.TextColumn(
                     "SSGR",
-                    help="Sustainable Sales Growth Rate (latest 3 years). 🟢 >0% | 🔴 ≤0%",
+                    help="Sustainable Sales Growth Rate (latest 3 years). 🟢 Green: >0% (Positive growth) | 🔴 Red: ≤0% (Negative/zero growth)",
                     width="small"
                 ),
                 "SSGR (Prev)": st.column_config.TextColumn(
                     "SSGR (Prev)",
-                    help="Sustainable Sales Growth Rate (previous 3 years). Compare with SSGR to see trend.",
+                    help="Sustainable Sales Growth Rate (previous 3 years). Compare with current SSGR to see trend.",
                     width="small"
                 ),
                 "QoQ Profit": st.column_config.TextColumn(
                     "QoQ Profit",
-                    help="Quarter-over-Quarter profit growth. 🟢 Increased | 🔴 Decreased",
+                    help="Quarter-over-Quarter profit growth (latest quarter vs previous). Shows growth % and quarter. 🟢 Profit increased | 🔴 Profit decreased",
                     width="medium"
                 ),
                 "Prev QoQ": st.column_config.TextColumn(
                     "Prev QoQ",
-                    help="Previous Quarter-over-Quarter profit growth.",
+                    help="Previous Quarter-over-Quarter profit growth. Shows growth % and quarter. Compare with QoQ Profit to spot trend direction.",
                     width="medium"
                 ),
                 "Y-o-Y Profit": st.column_config.TextColumn(
                     "Y-o-Y Profit",
-                    help="Year-over-Year profit growth. 🟢 Increased | 🔴 Decreased",
+                    help="Year-over-Year profit growth. 🟢 Green: Profit increased vs same quarter last year | 🔴 Red: Profit decreased",
                     width="small"
                 ),
                 "Y-o-Y Sales": st.column_config.TextColumn(
                     "Y-o-Y Sales",
-                    help="Year-over-Year sales growth. 🟢 Increased | 🔴 Decreased",
+                    help="Year-over-Year sales growth. 🟢 Green: Sales increased vs same quarter last year | 🔴 Red: Sales decreased",
                     width="small"
                 ),
                 "Promoter Holding": st.column_config.TextColumn(
                     "Promoter Holding",
-                    help="Promoter holding trend (last 4 quarters). 🟢 Stable/Increased | 🟡 Decreased <10% | 🔴 Decreased ≥10%",
+                    help="Promoter holding trend (last 4 quarters). 🟢 Green: Stable or increased | 🟡 Yellow: Decreased <10% | 🔴 Red: Decreased ≥10%",
                     width="medium"
                 ),
             }
         )
 
+        # Handle per-row delete — open dialog for first checked row
         checked_indices = edited_df[edited_df['🗑️']].index.tolist()
         if checked_indices:
             confirm_delete_dialog(company_codes[checked_indices[0]])
 
+        # Download button
         csv = filtered_df.to_csv(index=False)
         st.download_button(
             label="📥 Download CSV",
@@ -1039,14 +739,7 @@ def main():
             mime="text/csv"
         )
 
-        # Company detail panel
-        st.markdown("---")
-        render_company_detail(filtered_df)
-
-    # ─────────────────────────────────────────────────────
-    # Tab 2: Documentation
-    # ─────────────────────────────────────────────────────
-    with tab3:
+    with tab4:
         st.subheader("📖 Stock Analysis Portal Documentation")
 
         # Overview
@@ -1164,14 +857,31 @@ def main():
                             │
                             │ Calculation Script (Daily 6 PM):
                             │  • update_derived_metrics.py
+                            │    (unified script for all metrics)
                             ▼
 ┌───────────────────────────────────────────────────────────────────────────────┐
 │                    DERIVED TABLE (Calculated Metrics Only)                    │
 ├───────────────────────────────────────────────────────────────────────────────┤
 │  🎯 derived_metrics_analysis                                                  │
-│      • fcf_cfo_ratio, qoq_profit_growth, yoy_profit_growth                   │
-│      • yoy_sales_growth, promoter_trend, roce, debt_to_equity                │
-│      • green_score, sentiment_rating, ssgr, ssgr_prev                        │
+│                                                                               │
+│     CALCULATED FROM PRIMARY TABLES:                                           │
+│      • fcf_cfo_ratio          ← Sum 10Y from screener_quarterly              │
+│      • qoq_profit_growth      ← Calculated from screener_quarterly           │
+│      • yoy_profit_growth      ← Calculated from screener_quarterly           │
+│      • yoy_sales_growth       ← Calculated from screener_quarterly           │
+│      • promoter_trend         ← 4Q analysis from screener_shareholding       │
+│      • roce                   ← From screener_ratios                         │
+│      • debt_to_equity         ← From screener_balance_sheet                  │
+│      • green_score            ← Composite metric (0-5)                       │
+│      • sentiment_rating       ← Based on 52-week range                       │
+│                                                                               │
+│     PRICES (via JOIN):                                                        │
+│      • Portal JOINs with screener_daily_prices for current prices            │
+│                                                                               │
+│     YAHOO → SCREENER QUARTERLY (Daily 6 PM):                                 │
+│      • Sales+, Net Profit+    ← Latest 3 quarters to screener_quarterly     │
+│      • Operating Cash Flow+   ← Latest 3 quarters to screener_quarterly     │
+│      • Free Cash Flow+        ← Latest 3 quarters to screener_quarterly     │
 └───────────────────────────┬───────────────────────────────────────────────────┘
                             │
                             ▼
@@ -1195,6 +905,7 @@ def main():
             "Green Score": "Composite score (0-5) based on FCF/CFO, SSGR, Q-o-Q, Y-o-Y profit, Y-o-Y sales"
         }
 
+        st.markdown("**Metrics calculated from raw data:**")
         for metric, desc in metrics_data.items():
             st.markdown(f"- **{metric}**: {desc}")
 
@@ -1216,6 +927,39 @@ def main():
         ])
 
         st.dataframe(schedule_df, use_container_width=True, hide_index=True)
+
+        # Key Scripts
+        st.markdown("## 🔧 Key Scripts")
+
+        scripts_data = {
+            "stock_portal.py": "Main Streamlit UI application (this portal)",
+            "update_stock_prices_v2.py": "Yahoo Finance data sync (quick + full modes)",
+            "sync_new_companies.py": "Sync new companies from Screener.in",
+            "screener_downloader.py": "Download data from Screener.in for specific company",
+            "import_screener_to_sqlite.py": "Import JSON data into SQLite tables",
+            "update_yoy_sales.py": "Calculate Y-o-Y sales growth from quarterly data",
+            "update_promoter_holding.py": "Calculate promoter holding trends",
+            "update_roce.py": "Extract ROCE from Screener ratios"
+        }
+
+        for script, desc in scripts_data.items():
+            st.markdown(f"- **`{script}`**: {desc}")
+
+        # Filters Applied
+        st.markdown("## 🔍 Base Filters")
+        st.markdown("""
+        **All stocks in portal pass these criteria:**
+        - Interest Coverage > 3
+        - Sales Growth (10Y median) > 15%
+        - Debt/Equity < 0.5
+        - Current Ratio > 1.25
+        - Net Cash Flow (LY) > 0
+        - Promoter Holding > 51%
+        - FCF/CFO (3Y) > 1
+        - Market Cap > ₹10 Cr
+
+        Source: [Screener.in Filter](https://www.screener.in/screens/3474068/vm/)
+        """)
 
         # Color Coding
         st.markdown("## 🎨 Color Coding Guide")
@@ -1245,27 +989,59 @@ def main():
         2. **Secondary**: FCF/CFO ratio (descending)
         3. **Tertiary**: SSGR (descending)
         4. **Quaternary**: Q-o-Q, Y-o-Y profit, Y-o-Y sales (descending)
+
+        **Result**: Stocks with all 5 green indicators appear first
         """)
 
-        # Development Setup
+        # Data Flow
+        st.markdown("## 🔄 Data Flow Diagram")
+        st.code("""
+        SCREENER.IN                        YAHOO FINANCE
+             │                                  │
+             │ (Daily 6 AM)                     │ (Hourly + Daily 6 PM)
+             ▼                                  ▼
+        screener_*                        derived_metrics_analysis
+        tables                            table (prices)
+             │                                  │
+             │ (Calculate metrics)              │
+             ▼                                  ▼
+        derived_metrics_analysis ◄────────────────────────┘
+        table (complete)
+             │
+             ▼
+        STREAMLIT PORTAL
+        (This UI)
+        """, language="text")
+
+        # Logs
+        st.markdown("## 📝 Logs Location")
+        st.markdown("""
+        All automated scripts log to: `/Users/abalode/personnel/stock/logs/`
+
+        **Log Files:**
+        - `sync_companies_YYYYMMDD.log` - New company sync
+        - `yahoo_sync_YYYYMMDD.log` - Yahoo Finance updates (if used)
+        - Cron logs: `cron_price_update.log`, `cron_fundamentals_update.log`
+        """)
+
+        # Contact & Setup
         st.markdown("## 🚀 Development Setup")
         st.markdown("""
         **Environment:**
         ```bash
         # Activate virtual environment
-        source /home/amitbalode/personnel/venv/bin/activate
+        source venv/bin/activate
 
-        # Run portal (v1 – original)
+        # Run portal
         streamlit run stock_portal.py --server.port 8501
-
-        # Run portal (v2 – Bloomberg theme)
-        streamlit run stock_portal_v2.py --server.port 8501
 
         # Manual updates
         python update_stock_prices_v2.py --force
         python update_stock_prices_v2.py --fundamentals --force
         python sync_new_companies.py
         ```
+
+        **Dependencies:** `requirements.txt` (pandas, streamlit, yfinance, beautifulsoup4, etc.)
 
         **Database Backup:**
         ```bash
@@ -1274,8 +1050,7 @@ def main():
         """)
 
         st.markdown("---")
-        st.markdown("*Last Updated: March 2026 | Built with Streamlit + Python | Bloomberg Dark Theme v2*")
-
+        st.markdown("*Last Updated: February 2026 | Built with Streamlit + Python*")
 
 if __name__ == "__main__":
     main()

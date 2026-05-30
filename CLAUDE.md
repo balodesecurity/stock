@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-An Indian stock analysis system that scrapes financial data from screener.in, fetches live prices from Yahoo Finance, calculates derived metrics, and displays everything in a Streamlit portal. Tracks ~659 companies across multiple industries.
+An Indian stock analysis system that scrapes financial data from screener.in, fetches live prices from Yahoo Finance, calculates derived metrics, and displays everything in a Streamlit portal. Tracks ~670 companies across multiple industries.
 
-**Database:** `derived_metrics_analysis.db` (SQLite, ~35 MB)
+**Database:** `/home/amitbalode/personnel/derived_metrics_analysis.db` (SQLite, ~35 MB)
 **Portal:** `stock_portal.py` (Streamlit on port 8501)
 **Virtual env:** `/home/amitbalode/personnel/venv/`
 
@@ -69,6 +69,7 @@ pip install -r requirements.txt
 | `sync_new_companies.py` | Sync new companies from Screener.in filter + static portfolio | Daily 11 AM |
 | `update_stock_prices_v2.py` | Fetch prices from Yahoo Finance | Hourly 9 AM-3 PM (quick), Daily 12 PM (--fundamentals) |
 | `update_derived_metrics.py` | Calculate all derived metrics from primary tables | Daily 12 PM |
+| `cron_full_sync.sh` | Run all 3 crons in sequence (adhoc full sync) | Manual |
 | `backfill_sector_industry.py` | One-time/resume script to populate missing sector/industry; caches HTML in `cache/screener_html/` | Manual |
 
 ### Core Libraries
@@ -82,9 +83,9 @@ pip install -r requirements.txt
 ### Cron Schedule
 
 ```cron
-0 11 * * *         /Users/abalode/personnel/stock/cron_sync_companies.sh
-0 9-15 * * 1-5     /Users/abalode/personnel/stock/cron_update_prices_v2.sh
-0 12 * * 1-5       /Users/abalode/personnel/stock/cron_update_fundamentals.sh
+0 11 * * *         /home/amitbalode/personnel/stock/cron_sync_companies.sh
+0 9-15 * * 1-5     /home/amitbalode/personnel/stock/cron_update_prices.sh
+0 12 * * 1-5       /home/amitbalode/personnel/stock/cron_update_fundamentals.sh
 ```
 
 ## Database Schema
@@ -98,9 +99,21 @@ pip install -r requirements.txt
 **screener_ratios** - ROCE %, ROE %, Debtor Days, etc.
 **screener_shareholding** - Promoters+, FIIs+, DIIs+, Public+
 **screener_daily_prices** - current_price, previous_close, day_high, day_low, volume, week_52_high, week_52_low, updated_at
-**screener_companies** - company_code, company_name, enabled
-**portfolios** - portfolio_name, company_code
+**screener_companies** - company_code, company_name, enabled, created_at, source ('sync'/'manual')
+**portfolios** - portfolio_name, company_code (portfolios: 'Paytmmoney' = Amit's holdings, 'Static' = custom watchlist)
 **yahoo_ticker_cache** - Caches successful and failed Yahoo ticker resolutions (NULL ticker = failed; failures expire after `YAHOO_FAILED_CACHE_DAYS=30`)
+
+### screener_companies: source column
+
+`source` distinguishes how a company entered the DB:
+- `'sync'` — discovered via the Screener.in filter (`https://www.screener.in/screens/3474068/vm/`) or `STATIC_PORTFOLIO` in `constants.py`
+- `'manual'` — explicitly added via the portal "Add Stock" form (calls `sync_new_companies.py --companies CODE`)
+
+`source` is recalculated on every successful `sync_new_companies.py` run. The update is **skipped entirely** if the filter returns 0 companies (guards against accidentally marking everything manual on a failed fetch).
+
+`created_at` is set once at first insert and never overwritten on re-sync.
+
+**Important:** Both `created_at` timestamps (Python `datetime.now()`) and SQLite `CURRENT_TIMESTAMP` may coexist in the DB with different formats (with/without microseconds). Always use `pd.to_datetime(..., format='mixed')` when parsing `created_at` in pandas.
 
 ### Derived Table
 
@@ -147,6 +160,20 @@ CASE SUBSTR(quarter, 1, 3)
     WHEN 'Dec' THEN 12 ... WHEN 'Jan' THEN 1
 END DESC
 ```
+
+## Portal Features
+
+`stock_portal.py` is the Streamlit UI. Key sections:
+
+- **Sidebar filters**: portfolio filter (All / Amit's Portfolio / Static Portfolio), search, sentiment, P/E, industry, debt, market cap, 5Y CAGR, promoter holding, FCF/CFO
+- **Add Stock** (sidebar): paste a screener.in URL → adds to Static portfolio + triggers `sync_single_company` in background → company appears after ~60s refresh
+- **Delete Stock** (sidebar): select a company → confirmation modal → removes from all DB tables
+- **KPI cards**: summary stats across filtered companies
+- **Main table** (`st.data_editor`): all metrics with delete checkbox; includes Source (SYNC/MANUAL) and First Added date columns
+- **Company detail panel**: click a company for detailed metrics breakdown
+- **`load_data()`**: cached with `@st.cache_data(ttl=60)`; also runs DB migrations for new columns (`enabled`, `created_at`, `source`) on first call
+
+`stock_portal_old.py` — legacy file, do not modify.
 
 ## Key Formulas
 
@@ -222,8 +249,10 @@ ROUND((POWER(latest_sales / oldest_sales, 1.0/5) - 1) * 100, 2)
 
 ## Adding Companies
 
-### Via Static Portfolio
+### Via Portal (Manual)
+Use the **Add Stock** form in the sidebar — paste a screener.in URL. Sets `source='manual'`.
 
+### Via Static Portfolio (Sync)
 Edit `constants.py` and add to `STATIC_PORTFOLIO`:
 ```python
 STATIC_PORTFOLIO = [
@@ -231,13 +260,10 @@ STATIC_PORTFOLIO = [
     'NEWCOMPANY',  # Company Name
 ]
 ```
-Then run `python sync_new_companies.py` or wait for daily 11 AM sync.
-
-Company codes must match screener.in URLs: `https://www.screener.in/company/CODE/`
+Then run `python sync_new_companies.py` or wait for daily 11 AM sync. Sets `source='sync'`.
 
 ### Via Screener.in Filter
-
-Companies from the filter at `https://www.screener.in/screens/3474068/vm/` are automatically synced daily.
+Companies from `https://www.screener.in/screens/3474068/vm/` are automatically synced daily. Sets `source='sync'`.
 
 ## Adding New Metrics
 
@@ -255,7 +281,7 @@ When adding new screener.in data sections:
 
 ## Logging
 
-Log files in `stock/logs/` with daily rotation:
+Log files in `logs/` with daily rotation:
 ```
 stock_prices_quick_YYYYMMDD.log    (hourly price updates)
 stock_prices_full_YYYYMMDD.log     (daily fundamentals)
@@ -267,9 +293,8 @@ Format: `YYYY-MM-DD HH:MM:SS - LEVEL - MESSAGE`
 
 View logs:
 ```bash
-tail -f stock/logs/derived_metrics_$(date +%Y%m%d).log
-grep "ERROR" stock/logs/*.log
-grep "RELIANCE" stock/logs/derived_metrics_*.log
+tail -f logs/derived_metrics_$(date +%Y%m%d).log
+grep "ERROR" logs/*.log
 ```
 
 ## Useful SQL Queries
@@ -295,14 +320,6 @@ FROM derived_metrics_analysis
 WHERE ssgr > 30 AND debt_to_equity < 0.5 AND star_rating >= 4
 ORDER BY ssgr DESC;
 
--- Industry leaders
-SELECT industry, company_code, company_name, star_rating, pe_ratio, total_fcf, ssgr
-FROM (
-    SELECT *, ROW_NUMBER() OVER (PARTITION BY industry ORDER BY star_rating DESC, total_fcf DESC) as rn
-    FROM derived_metrics_analysis WHERE star_rating >= 4
-) WHERE rn = 1
-ORDER BY star_rating DESC, total_fcf DESC;
-
 -- 10-year profit history from screener data
 SELECT year, value as profit_cr
 FROM screener_annual_pl
@@ -316,6 +333,9 @@ JOIN screener_companies c ON s.company_code = c.company_code
 WHERE s.metric = 'Promoters+'
   AND s.quarter = (SELECT MAX(quarter) FROM screener_shareholding WHERE company_code = s.company_code)
 ORDER BY CAST(REPLACE(REPLACE(s.value, '%', ''), ',', '') AS REAL) DESC;
+
+-- SYNC vs MANUAL companies
+SELECT source, COUNT(*) FROM screener_companies GROUP BY source;
 ```
 
 ## Running Commands
@@ -334,13 +354,22 @@ python update_derived_metrics.py
 # Sync new companies
 python sync_new_companies.py
 
-# Start portal
-cd /Users/abalode/personnel/stock
-streamlit run stock_portal.py --server.port 8501
+# Full adhoc sync (all 3 crons in sequence)
+bash cron_full_sync.sh
 
-# Database queries
-sqlite3 derived_metrics_analysis.db -header -box "YOUR_QUERY_HERE"
+# Add a single company by code
+python sync_new_companies.py --companies TICKER
+
+# Start portal
+streamlit run stock_portal.py --server.port 8501 --server.headless true
+
+# SSH tunnel (run on Mac to access portal at localhost:8501)
+ssh -N -L 8501:localhost:8501 amitbalode@192.168.1.85
 ```
+
+## Claude Slash Commands
+
+- `/amit-stock-sync` — runs the full sync (`cron_full_sync.sh`) from within Claude Code
 
 ## Rate Limiting
 

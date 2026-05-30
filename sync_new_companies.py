@@ -439,23 +439,30 @@ def insert_data_section(conn, company_code, section_name, data_rows, table_name,
 
     return inserted
 
-def import_screener_data_to_db(company_code, data):
+def import_screener_data_to_db(company_code, data, source='sync'):
     """Import screener data into database tables"""
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
 
     try:
-        # Insert company metadata
+        # Insert company metadata — preserve created_at for existing companies
         cursor.execute("""
-            INSERT OR REPLACE INTO screener_companies
-            (company_code, company_name, report_type, url, last_updated)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO screener_companies
+            (company_code, company_name, report_type, url, last_updated, created_at, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(company_code) DO UPDATE SET
+                company_name = excluded.company_name,
+                report_type  = excluded.report_type,
+                url          = excluded.url,
+                last_updated = excluded.last_updated
         """, (
             company_code,
             data.get('company_name'),
             data.get('report_type'),
             data.get('url'),
-            datetime.now()
+            datetime.now(),
+            datetime.now(),
+            source
         ))
 
         # Insert each data section
@@ -483,7 +490,7 @@ def import_screener_data_to_db(company_code, data):
         logger.info(f"  ✗ Error importing screener data: {e}")
         return False
 
-def add_company_to_db(company_code):
+def add_company_to_db(company_code, source='sync'):
     """Add new company with all required fields"""
     logger.info("")
     logger.info("="*80)
@@ -511,7 +518,7 @@ def add_company_to_db(company_code):
                 logger.info("  ✓ Using base URL data")
 
         # Import to database
-        if not import_screener_data_to_db(company_code, data):
+        if not import_screener_data_to_db(company_code, data, source=source):
             logger.info("  ✗ Failed to import data to database")
             return False
 
@@ -938,6 +945,28 @@ def main():
     logger.info(f"Active companies: {len(active_set)} (filter={len(filter_companies)}, portfolios={len(portfolio_companies)}, static={len(static_portfolio)})")
     update_enabled_status(active_set)
 
+    # Update source: sync = in filter/static, manual = everything else
+    # Only run if filter fetch succeeded — skip entirely if filter returned nothing
+    # to avoid accidentally marking everything manual on a failed run.
+    logger.info("")
+    logger.info("-"*80)
+    logger.info("UPDATE SOURCE (SYNC vs MANUAL)")
+    logger.info("-"*80)
+    if not filter_companies:
+        logger.warning("⚠ Skipping source update — filter returned 0 companies (possible fetch failure).")
+    else:
+        sync_set = list(set(filter_companies + static_portfolio))
+        conn = sqlite3.connect(DATABASE_PATH)
+        cursor = conn.cursor()
+        placeholders = ','.join('?' for _ in sync_set)
+        cursor.execute(f"UPDATE screener_companies SET source = 'sync' WHERE company_code IN ({placeholders})", sync_set)
+        cursor.execute(f"UPDATE screener_companies SET source = 'manual' WHERE company_code NOT IN ({placeholders})", sync_set)
+        conn.commit()
+        cursor.execute("SELECT source, COUNT(*) FROM screener_companies GROUP BY source")
+        counts = dict(cursor.fetchall())
+        conn.close()
+        logger.info(f"sync={counts.get('sync', 0)}, manual={counts.get('manual', 0)}")
+
     logger.info("")
     logger.info("="*80)
     logger.info(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -956,7 +985,7 @@ def sync_single_company(company_code):
     if company_code in existing:
         logger.info(f"✓ {company_code} already exists in DB — skipping screener download.")
     else:
-        ok = add_company_to_db(company_code)
+        ok = add_company_to_db(company_code, source='manual')
         if not ok:
             logger.info(f"✗ Failed to add {company_code}.")
             return
