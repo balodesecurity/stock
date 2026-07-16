@@ -1574,6 +1574,7 @@ def main():
 
     # ── Navigation (radio persists across reruns via session_state) ──
     _portfolio_tab_name = None
+    _is_admin = st.user.is_logged_in and st.user.email == 'amit.balode@gmail.com'
     if st.user.is_logged_in:
         _pf_first = (st.user.name or st.user.email or "User").split()[0]
         _portfolio_tab_name = f"{_pf_first}'s Portfolio"
@@ -1581,6 +1582,8 @@ def main():
     if _portfolio_tab_name:
         _nav_options.append(_portfolio_tab_name)
     _nav_options.append('FAQ')
+    if _is_admin:
+        _nav_options.append('Admin')
 
     if 'nav_tab' not in st.session_state:
         st.session_state.nav_tab = 'Home'
@@ -2489,6 +2492,40 @@ def main():
                 )
                 render_company_detail(df, preselect_code=_sel_code)
 
+
+    # ─────────────────────────────────────────────────────
+    # ADMIN — visible only to amit.balode@gmail.com
+    # ─────────────────────────────────────────────────────
+    elif _nav == 'Admin' and _is_admin:
+        section_header('Admin', 'All users and their portfolios')
+        conn = get_connection()
+        _all_users = conn.execute(
+            "SELECT id, name, email, created_at FROM users ORDER BY created_at"
+        ).fetchall()
+
+        if not _all_users:
+            st.info("No users registered yet.")
+        else:
+            for _uid, _uname, _uemail, _ucreated in _all_users:
+                _stocks = conn.execute(
+                    """SELECT ups.company_code, c.company_name, ups.added_at
+                       FROM user_portfolio_stocks ups
+                       LEFT JOIN screener_companies c ON c.company_code = ups.company_code
+                       WHERE ups.user_id = ?
+                       ORDER BY ups.added_at""",
+                    (_uid,)
+                ).fetchall()
+
+                _display_name = _uname or '(no name)'
+                _registered = pd.to_datetime(_ucreated, format='mixed').strftime('%d %b %Y, %I:%M %p') if _ucreated else 'N/A'
+
+                with st.expander(f"{_display_name} — {_uemail}  ·  {len(_stocks)} stocks  ·  joined {_registered}", expanded=True):
+                    if not _stocks:
+                        st.caption("No stocks in portfolio.")
+                    else:
+                        _admin_df = pd.DataFrame(_stocks, columns=['Code', 'Company', 'Added'])
+                        _admin_df['Added'] = pd.to_datetime(_admin_df['Added'], format='mixed').dt.strftime('%d %b %Y, %I:%M %p')
+                        st.dataframe(_admin_df, use_container_width=True, hide_index=True)
 
     # ─────────────────────────────────────────────────────
     # FAQ
