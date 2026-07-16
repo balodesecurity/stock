@@ -11,14 +11,7 @@ on:
     paths:
       - Dockerfile
       - requirements.txt
-      - stock_portal.py
-      - lib.py
-      - constants.py
-      - compute_growth_metrics.py
-      - discover_new_companies.py
-      - screener_downloader.py
-      - fetch_market_data.py
-      - us_stock_downloader.py
+      - "**.py"
       - .streamlit/config.toml
 
 # ── Configuration — update these if infrastructure changes ────────────────────
