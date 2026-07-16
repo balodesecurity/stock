@@ -21,7 +21,7 @@ env:
   SECRETS_CONTAINER_PATH: /root/.streamlit/secrets.toml
 
 jobs:
-  deploy:
+  build-image-deploy-to-ec2:
     runs-on: ubuntu-latest
 
     steps:
