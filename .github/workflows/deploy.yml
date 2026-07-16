@@ -1,9 +1,24 @@
 name: Deploy to EC2
 
+# Triggers on push to any branch except main.
+# Workflow: develop on a feature branch → push → auto-deploys to alphavest.in → merge to main when done.
 on:
   push:
     branches-ignore:
       - main
+
+# ── Configuration — update these if infrastructure changes ────────────────────
+env:
+  AWS_REGION: ap-south-1
+  ECR_IMAGE: 782818417773.dkr.ecr.ap-south-1.amazonaws.com/stock-portal:latest
+  EC2_HOST: 13.204.149.14
+  EC2_USER: ec2-user
+  CONTAINER_NAME: stock-portal
+  STREAMLIT_PORT: 8501
+  DB_HOST_PATH: /home/ec2-user/derived_metrics_analysis.db
+  DB_CONTAINER_PATH: /app/derived_metrics_analysis.db
+  SECRETS_HOST_PATH: /home/ec2-user/.streamlit/secrets.toml
+  SECRETS_CONTAINER_PATH: /root/.streamlit/secrets.toml
 
 jobs:
   deploy:
@@ -18,12 +33,14 @@ jobs:
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ap-south-1
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Set up Docker Buildx
+        # Buildx enables cross-platform builds — GitHub runners are x86_64 but
+        # we explicitly target linux/amd64 to match the EC2 instance architecture.
         uses: docker/setup-buildx-action@v3
 
       - name: Build and push image to ECR
@@ -32,23 +49,27 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
-          tags: 782818417773.dkr.ecr.ap-south-1.amazonaws.com/stock-portal:latest
+          tags: ${{ env.ECR_IMAGE }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Deploy on EC2
         uses: appleboy/ssh-action@v1
         with:
-          host: 13.204.149.14
-          username: ec2-user
+          host: ${{ env.EC2_HOST }}
+          username: ${{ env.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
+          envs: AWS_REGION,ECR_IMAGE,CONTAINER_NAME,STREAMLIT_PORT,DB_HOST_PATH,DB_CONTAINER_PATH,SECRETS_HOST_PATH,SECRETS_CONTAINER_PATH
           script: |
-            aws ecr get-login-password --region ap-south-1 \
+            aws ecr get-login-password --region "$AWS_REGION" \
               | docker login --username AWS --password-stdin \
-                782818417773.dkr.ecr.ap-south-1.amazonaws.com
-            docker pull 782818417773.dkr.ecr.ap-south-1.amazonaws.com/stock-portal:latest
-            docker stop stock-portal && docker rm stock-portal
-            docker run -d --name stock-portal --restart unless-stopped -p 8501:8501 \
-              -v /home/ec2-user/derived_metrics_analysis.db:/app/derived_metrics_analysis.db \
-              -v /home/ec2-user/.streamlit/secrets.toml:/root/.streamlit/secrets.toml \
-              782818417773.dkr.ecr.ap-south-1.amazonaws.com/stock-portal:latest
+                  "$(echo $ECR_IMAGE | cut -d/ -f1)"
+            docker pull "$ECR_IMAGE"
+            docker stop "$CONTAINER_NAME" && docker rm "$CONTAINER_NAME"
+            docker run -d \
+              --name "$CONTAINER_NAME" \
+              --restart unless-stopped \
+              -p "$STREAMLIT_PORT:$STREAMLIT_PORT" \
+              -v "$DB_HOST_PATH:$DB_CONTAINER_PATH" \
+              -v "$SECRETS_HOST_PATH:$SECRETS_CONTAINER_PATH" \
+              "$ECR_IMAGE"
