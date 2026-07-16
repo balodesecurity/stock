@@ -2527,7 +2527,7 @@ def main():
                     else:
                         _admin_df = pd.DataFrame(_stocks, columns=['Code', 'Company', 'Added'])
                         _admin_df['Added'] = pd.to_datetime(_admin_df['Added'], format='mixed').dt.strftime('%d %b %Y, %I:%M %p')
-                        st.dataframe(_admin_df, use_container_width=True, hide_index=True)
+                        st.dataframe(_admin_df, width='stretch', hide_index=True)
 
     # ─────────────────────────────────────────────────────
     # FAQ
