@@ -731,6 +731,92 @@ def _vrow(label: str, formatted: str, css_class: str = "") -> str:
     )
 
 
+_US_MARKETS = {'NYSE', 'NASDAQ', 'AMEX'}
+
+
+def render_portfolio_table(df: pd.DataFrame, pf_codes: list, key_prefix: str = 'pf'):
+    """Render the portfolio table with company details on row selection.
+
+    df         — full derived_metrics_analysis dataframe (from load_data)
+    pf_codes   — list of company_code strings to show
+    key_prefix — unique prefix for Streamlit widget keys (avoid collisions in admin)
+    """
+    if not pf_codes:
+        return
+
+    _pf_df = df[df['company_code'].isin(pf_codes)].copy().reset_index(drop=True)
+
+    def _currency(row):
+        return '$' if row.get('exchange') in _US_MARKETS else '₹'
+
+    def _fmt_mcap(x):
+        if pd.isna(x):
+            return "N/A"
+        if x >= 100000:
+            return f"₹{x/100000:.1f}L Cr"
+        return f"₹{x:,.0f} Cr"
+
+    _pf_df['CMP'] = _pf_df.apply(
+        lambda x: format_price(x['current_price'], x['price_change_pct'],
+                               x['updated_at'], currency=_currency(x)), axis=1
+    )
+    _pf_df['P/E']       = _pf_df['pe_ratio'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "N/A")
+    _pf_df['Mkt Cap']   = _pf_df['market_cap'].apply(_fmt_mcap)
+    _pf_df['SSGR']      = _pf_df['ssgr'].apply(
+        lambda x: ("🟢 " if pd.notna(x) and x > 0 else "") + (f"{x:.1f}%" if pd.notna(x) else "N/A")
+    )
+    _pf_df['FCF (10Y)'] = _pf_df['fcf_category'].apply(
+        lambda x: "🟢 Positive" if x == "Positive" else (x if pd.notna(x) else "N/A")
+    )
+    _pf_df['YoY Sales'] = _pf_df['yoy_sales_growth'].apply(
+        lambda x: ("🟢 " if pd.notna(x) and x > 0 else "") + (f"{x:+.1f}%" if pd.notna(x) else "N/A")
+    )
+    _pf_df['Promoter']     = _pf_df['promoter_holding'].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A")
+    _pf_df['52W Position'] = _pf_df['sentiment_rating'].apply(render_valuation)
+
+    _pf_display = _pf_df[[
+        'company_code', 'company_name', 'sector',
+        'CMP', 'P/E', 'Mkt Cap', 'SSGR', 'FCF (10Y)', 'YoY Sales', 'Promoter', '52W Position'
+    ]].rename(columns={'company_code': 'Code', 'company_name': 'Company', 'sector': 'Sector'}).copy()
+
+    st.markdown(
+        '<div style="font-size:11px;color:#475569;margin-bottom:6px">'
+        'Click any checkbox to view company details below</div>',
+        unsafe_allow_html=True
+    )
+    _event = st.dataframe(
+        _pf_display,
+        use_container_width=True,
+        height=min(500, max(120, len(_pf_display) * 38 + 42)),
+        on_select="rerun",
+        selection_mode="single-row",
+        hide_index=True,
+        key=f"{key_prefix}_table",
+        column_config={
+            "Code":         st.column_config.TextColumn("Code",    width=80),
+            "Company":      st.column_config.TextColumn("Company", width=200),
+            "Sector":       st.column_config.TextColumn("Sector",  width=120),
+            "CMP":          st.column_config.TextColumn("CMP",     width=160),
+            "SSGR":         st.column_config.TextColumn("SSGR",         help="Self-Sustainable Growth Rate — 🟢 means positive"),
+            "FCF (10Y)":    st.column_config.TextColumn("FCF (10Y)",    help="Cumulative Free Cash Flow over last 10 years — 🟢 means positive"),
+            "YoY Sales":    st.column_config.TextColumn("YoY Sales",    help="Year-on-Year Sales Growth — 🟢 means growing"),
+            "52W Position": st.column_config.TextColumn("52W Position", help="Where current price sits in the 52-week high/low range"),
+        }
+    )
+
+    _sel_rows = _event.selection.rows if _event else []
+    if _sel_rows:
+        _sel_code = _pf_display.iloc[_sel_rows[0]]['Code']
+        st.markdown(
+            f'<div style="margin:28px 0 10px;padding-bottom:8px;'
+            f'border-bottom:1px solid rgba(255,255,255,0.07)">'
+            f'<span style="font-size:11px;font-weight:700;color:#94a3b8;'
+            f'text-transform:uppercase;letter-spacing:2px">{_sel_code} — Analysis</span></div>',
+            unsafe_allow_html=True
+        )
+        render_company_detail(df, preselect_code=_sel_code)
+
+
 def render_company_detail(filtered_df: pd.DataFrame, preselect_code: str = None):
     """Render company detail panel. Pass preselect_code to skip the dropdown."""
     if preselect_code:
@@ -1383,7 +1469,6 @@ def render_company_detail(filtered_df: pd.DataFrame, preselect_code: str = None)
 # ─────────────────────────────────────────────────────────
 
 def main():
-    _us_markets    = {'NYSE', 'NASDAQ', 'AMEX'}
     _india_markets = {'NSE', 'BSE'}
     market_filter  = "🇮🇳 India"
     _is_india = True
@@ -1429,7 +1514,7 @@ def main():
 
     # Apply market filter — always one of the two markets
     if _is_us:
-        df = df[df['exchange'].isin(_us_markets)]
+        df = df[df['exchange'].isin(_US_MARKETS)]
     else:
         df = df[df['exchange'].isin(_india_markets) | df['exchange'].isna()]
 
@@ -1956,7 +2041,7 @@ def main():
         company_codes = display_df['company_code'].tolist()
 
         def _row_currency(row):
-            return '$' if row.get('exchange') in _us_markets else '₹'
+            return '$' if row.get('exchange') in _US_MARKETS else '₹'
 
         display_df['cmp'] = display_df.apply(
             lambda x: format_price(x['current_price'], x['price_change_pct'], x['updated_at'],
@@ -1984,7 +2069,7 @@ def main():
         display_df['roce']             = display_df['roce'].apply(format_roce)
         display_df['market_cap'] = display_df.apply(
             lambda r: (f"{r['market_cap']:.0f} Cr" if pd.notna(r['market_cap']) else "N/A")
-            if r.get('exchange') in _us_markets
+            if r.get('exchange') in _US_MARKETS
             else (f"₹{r['market_cap']:.0f} Cr" if pd.notna(r['market_cap']) else "N/A"),
             axis=1
         )
@@ -2023,7 +2108,7 @@ def main():
         )
         display_df['total_fcf'] = display_df.apply(
             lambda r: format_number(r['total_fcf'], unit='M')
-            if r.get('exchange') in _us_markets
+            if r.get('exchange') in _US_MARKETS
             else format_number(r['total_fcf']),
             axis=1
         )
@@ -2039,7 +2124,7 @@ def main():
         display_df['company_code'] = display_df.apply(
             lambda r: (
                 f"https://finance.yahoo.com/quote/{r['company_code']}/"
-                if r.get('exchange') in _us_markets
+                if r.get('exchange') in _US_MARKETS
                 else f"https://www.screener.in/company/{r['company_code']}/"
             ) if pd.notna(r['company_code']) else "",
             axis=1
@@ -2419,80 +2504,7 @@ def main():
                 unsafe_allow_html=True
             )
         else:
-            _pf_df = df[df['company_code'].isin(_user_pf_codes)].copy().reset_index(drop=True)
-
-            # ── Format for display ──
-            def _pf_currency(row):
-                return '$' if row.get('exchange') in _us_markets else '₹'
-
-            def _fmt_mcap(x):
-                if pd.isna(x):
-                    return "N/A"
-                if x >= 100000:
-                    return f"₹{x/100000:.1f}L Cr"
-                return f"₹{x:,.0f} Cr"
-
-            _pf_df['CMP'] = _pf_df.apply(
-                lambda x: format_price(x['current_price'], x['price_change_pct'],
-                                       x['updated_at'], currency=_pf_currency(x)), axis=1
-            )
-            _pf_df['P/E'] = _pf_df['pe_ratio'].apply(lambda x: f"{x:.1f}" if pd.notna(x) else "N/A")
-            _pf_df['Mkt Cap'] = _pf_df['market_cap'].apply(_fmt_mcap)
-            _pf_df['SSGR'] = _pf_df['ssgr'].apply(
-                lambda x: ("🟢 " if pd.notna(x) and x > 0 else "") + (f"{x:.1f}%" if pd.notna(x) else "N/A")
-            )
-            _pf_df['FCF (10Y)'] = _pf_df['fcf_category'].apply(
-                lambda x: "🟢 Positive" if x == "Positive" else (x if pd.notna(x) else "N/A")
-            )
-            _pf_df['YoY Sales'] = _pf_df['yoy_sales_growth'].apply(
-                lambda x: ("🟢 " if pd.notna(x) and x > 0 else "") + (f"{x:+.1f}%" if pd.notna(x) else "N/A")
-            )
-            _pf_df['Promoter'] = _pf_df['promoter_holding'].apply(
-                lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A"
-            )
-            _pf_df['52W Position'] = _pf_df['sentiment_rating'].apply(render_valuation)
-
-            _pf_display = _pf_df[[
-                'company_code', 'company_name', 'sector',
-                'CMP', 'P/E', 'Mkt Cap', 'SSGR', 'FCF (10Y)', 'YoY Sales', 'Promoter', '52W Position'
-            ]].rename(columns={'company_code': 'Code', 'company_name': 'Company', 'sector': 'Sector'}).copy()
-
-            st.markdown(
-                '<div style="font-size:11px;color:#475569;margin-bottom:6px">'
-                'Click any checkbox to view company details below</div>',
-                unsafe_allow_html=True
-            )
-            _pf_event = st.dataframe(
-                _pf_display,
-                use_container_width=True,
-                height=min(500, max(120, len(_pf_display) * 38 + 42)),
-                on_select="rerun",
-                selection_mode="single-row",
-                hide_index=True,
-                column_config={
-                    "Code":    st.column_config.TextColumn("Code",    width=80),
-                    "Company": st.column_config.TextColumn("Company", width=200),
-                    "Sector":  st.column_config.TextColumn("Sector",  width=120),
-                    "CMP":     st.column_config.TextColumn("CMP",     width=160),
-                    "SSGR":       st.column_config.TextColumn("SSGR",       help="Self-Sustainable Growth Rate — 🟢 means positive (company can fund its own growth)"),
-                    "FCF (10Y)":  st.column_config.TextColumn("FCF (10Y)",  help="Cumulative Free Cash Flow over last 10 years — 🟢 means positive"),
-                    "YoY Sales":  st.column_config.TextColumn("YoY Sales",  help="Year-on-Year Sales Growth (latest quarter vs same quarter last year) — 🟢 means growing"),
-                    "52W Position": st.column_config.TextColumn("52W Position", help="Where current price sits in the 52-week high/low range"),
-                }
-            )
-
-            # Company detail on row click
-            _sel_rows = _pf_event.selection.rows if _pf_event else []
-            if _sel_rows:
-                _sel_code = _pf_display.iloc[_sel_rows[0]]['Code']
-                st.markdown(
-                    f'<div style="margin:28px 0 10px;padding-bottom:8px;'
-                    f'border-bottom:1px solid rgba(255,255,255,0.07)">'
-                    f'<span style="font-size:11px;font-weight:700;color:#94a3b8;'
-                    f'text-transform:uppercase;letter-spacing:2px">{_sel_code} — Analysis</span></div>',
-                    unsafe_allow_html=True
-                )
-                render_company_detail(df, preselect_code=_sel_code)
+            render_portfolio_table(df, _user_pf_codes, key_prefix='pf')
 
 
     # ─────────────────────────────────────────────────────
@@ -2509,25 +2521,19 @@ def main():
             st.info("No users registered yet.")
         else:
             for _uid, _uname, _uemail, _ucreated in _all_users:
-                _stocks = conn.execute(
-                    """SELECT ups.company_code, c.company_name, ups.added_at
-                       FROM user_portfolio_stocks ups
-                       LEFT JOIN screener_companies c ON c.company_code = ups.company_code
-                       WHERE ups.user_id = ?
-                       ORDER BY ups.added_at""",
+                _pf_codes = [r[0] for r in conn.execute(
+                    "SELECT company_code FROM user_portfolio_stocks WHERE user_id = ? ORDER BY added_at",
                     (_uid,)
-                ).fetchall()
+                ).fetchall()]
 
                 _display_name = _uname or '(no name)'
                 _registered = pd.to_datetime(_ucreated, format='mixed').strftime('%d %b %Y, %I:%M %p') if _ucreated else 'N/A'
 
-                with st.expander(f"{_display_name} — {_uemail}  ·  {len(_stocks)} stocks  ·  joined {_registered}", expanded=True):
-                    if not _stocks:
+                with st.expander(f"{_display_name} — {_uemail}  ·  {len(_pf_codes)} stocks  ·  joined {_registered}", expanded=True):
+                    if not _pf_codes:
                         st.caption("No stocks in portfolio.")
                     else:
-                        _admin_df = pd.DataFrame(_stocks, columns=['Code', 'Company', 'Added'])
-                        _admin_df['Added'] = pd.to_datetime(_admin_df['Added'], format='mixed').dt.strftime('%d %b %Y, %I:%M %p')
-                        st.dataframe(_admin_df, width='stretch', hide_index=True)
+                        render_portfolio_table(df, _pf_codes, key_prefix=f"admin_{_uid}")
 
     # ─────────────────────────────────────────────────────
     # FAQ
