@@ -18,7 +18,21 @@ from logging.handlers import TimedRotatingFileHandler
 # Add current directory to path to import existing modules
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from screener_downloader import ScreenerDownloader
-from constants import SCREENER_FILTER_URL, DATABASE_PATH, QUARTER_ORDER_DESC, LOGS_DIR
+from constants import SCREENER_FILTER_URL, DATABASE_PATH, QUARTER_ORDER_DESC, LOGS_DIR, DEFAULT_EXCHANGE_RATE
+try:
+    from us_stock_downloader import USStockDownloader
+    _US_DOWNLOADER_AVAILABLE = USStockDownloader is not None
+except (ImportError, Exception):
+    USStockDownloader = None
+    _US_DOWNLOADER_AVAILABLE = False
+
+# Optional US-sync dependencies
+try:
+    import numpy as np
+    from finvizfinance.screener.overview import Overview as FinvizOverview
+    _FINVIZ_AVAILABLE = True
+except ImportError:
+    _FINVIZ_AVAILABLE = False
 
 # Setup logging
 def setup_logging():
@@ -27,10 +41,10 @@ def setup_logging():
     os.makedirs(log_dir, exist_ok=True)
 
     # Log filename with date
-    log_file = os.path.join(log_dir, f'sync_companies_{datetime.now().strftime("%Y%m%d")}.log')
+    log_file = os.path.join(log_dir, f'discover_new_companies_{datetime.now().strftime("%Y%m%d")}.log')
 
     # Create logger
-    logger = logging.getLogger('sync_companies')
+    logger = logging.getLogger('discover_new_companies')
     logger.setLevel(logging.INFO)
 
     # Remove existing handlers
@@ -448,18 +462,16 @@ def import_screener_data_to_db(company_code, data, source='sync'):
         # Insert company metadata — preserve created_at for existing companies
         cursor.execute("""
             INSERT INTO screener_companies
-            (company_code, company_name, report_type, url, last_updated, created_at, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            (company_code, company_name, report_type, last_updated, created_at, source)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(company_code) DO UPDATE SET
                 company_name = excluded.company_name,
                 report_type  = excluded.report_type,
-                url          = excluded.url,
                 last_updated = excluded.last_updated
         """, (
             company_code,
             data.get('company_name'),
             data.get('report_type'),
-            data.get('url'),
             datetime.now(),
             datetime.now(),
             source
@@ -507,13 +519,12 @@ def add_company_to_db(company_code, source='sync'):
             logger.info("  ✗ Failed to download data from Screener.in")
             return False
 
-        # If consolidated has no financial data, fall back to base URL (which may be standalone)
-        has_financials = any(data.get(key) for key in ['quarterly_results', 'annual_profit_loss', 'balance_sheet'])
-        if not has_financials:
+        # If consolidated has no usable column data, fall back to base URL (standalone)
+        if not downloader._has_valid_financial_data(data):
             logger.info("  ⚠️  No financial data in consolidated, trying base URL...")
             time.sleep(2)
             base_data = downloader.download_company_data(company_code, '')
-            if base_data and any(base_data.get(key) for key in ['quarterly_results', 'annual_profit_loss', 'balance_sheet']):
+            if base_data and downloader._has_valid_financial_data(base_data):
                 data = base_data
                 logger.info("  ✓ Using base URL data")
 
@@ -967,10 +978,38 @@ def main():
         conn.close()
         logger.info(f"sync={counts.get('sync', 0)}, manual={counts.get('manual', 0)}")
 
+    # Sync US companies (Finviz + yfinance)
+    sync_us_companies()
+
     logger.info("")
     logger.info("="*80)
     logger.info(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("="*80)
+
+def _refresh_screener_data(company_code):
+    """Re-download Screener.in financials for an existing company and upsert into DB."""
+    downloader = ScreenerDownloader()
+    try:
+        data = downloader.download_company_data(company_code, 'consolidated')
+        if not data:
+            logger.info("  ✗ No data returned from Screener.in (consolidated)")
+            return False
+        if not downloader._has_valid_financial_data(data):
+            logger.info("  ⚠️  No financials in consolidated, trying base URL...")
+            time.sleep(2)
+            base_data = downloader.download_company_data(company_code, '')
+            if base_data and downloader._has_valid_financial_data(base_data):
+                data = base_data
+                logger.info("  ✓ Using base URL data")
+        if not import_screener_data_to_db(company_code, data, source='manual'):
+            logger.info("  ✗ Failed to import Screener data to DB")
+            return False
+        logger.info("  ✓ Screener.in data refreshed")
+        return True
+    except Exception as e:
+        logger.info(f"  ✗ Error refreshing Screener data: {e}")
+        return False
+
 
 def sync_single_company(company_code):
     """Targeted sync for a single company — skips filter fetch, just downloads and enables."""
@@ -983,7 +1022,12 @@ def sync_single_company(company_code):
 
     existing = get_existing_companies()
     if company_code in existing:
-        logger.info(f"✓ {company_code} already exists in DB — skipping screener download.")
+        # Company row exists — but re-download financials in case they're missing or stale
+        logger.info(f"✓ {company_code} already in DB — refreshing financial data from Screener.in...")
+        ok = _refresh_screener_data(company_code)
+        if not ok:
+            logger.info(f"✗ Failed to refresh {company_code} from Screener.in.")
+            return
     else:
         ok = add_company_to_db(company_code, source='manual')
         if not ok:
@@ -1002,14 +1046,369 @@ def sync_single_company(company_code):
 
     # Fetch live price now that company is confirmed in DB
     logger.info(f"Fetching live price for {company_code}...")
-    from update_stock_prices_v2 import update_prices_quick
-    update_prices_quick(force=True, company_filter=[company_code])
+    from fetch_market_data import update_prices_quick
+    update_prices_quick(company_filter=[company_code])
 
     # Recalculate all derived metrics so the new company is fully populated
     logger.info(f"Recalculating derived metrics for all companies...")
-    from update_derived_metrics import update_all_metrics
+    from compute_growth_metrics import update_all_metrics
     update_all_metrics()
 
+    logger.info("="*80)
+    logger.info(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("="*80)
+
+
+# ── US Stock Sync ─────────────────────────────────────────────────────────────
+
+# Maps yfinance exchange codes to canonical names stored in screener_companies.exchange
+_YF_EXCHANGE_MAP = {
+    'NYQ': 'NYSE', 'NYE': 'NYSE',
+    'NMS': 'NASDAQ', 'NGM': 'NASDAQ', 'NCM': 'NASDAQ', 'NAS': 'NASDAQ',
+    'ASE': 'AMEX',
+}
+_US_EXCHANGES = {'NYSE', 'NASDAQ', 'AMEX'}
+
+
+def _get_us_candidates_from_finviz():
+    """Phase 1: Finviz pre-screen. Returns list of ticker symbols (~300-600)."""
+    logger.info("Fetching US candidates from Finviz pre-screen...")
+    try:
+        fov = FinvizOverview()
+        fov.set_filter(filters_dict={
+            "Market Cap.":       "+Micro (over $50mln)",
+            "InsiderOwnership":  "Over 10%",
+            "Net Profit Margin": "Positive (>0%)",
+            "Country":           "USA",
+        })
+        df = fov.screener_view()
+        symbols = df["Ticker"].tolist()
+        logger.info(f"  Finviz returned {len(symbols)} candidates")
+        return symbols
+    except Exception as e:
+        logger.error(f"  Finviz pre-screen failed: {e}")
+        return []
+
+
+def _fetch_us_company_metrics(symbol):
+    """Phase 2: yfinance deep metrics for one US stock. Returns dict or None if filtered out."""
+    try:
+        t    = yf.Ticker(symbol)
+        info = t.info
+
+        market_cap    = info.get("marketCap") or 0
+        current_ratio = info.get("currentRatio")
+        insider_pct   = (info.get("heldPercentInsiders") or 0) * 100
+
+        # Cheap pre-filter before hitting financials endpoints
+        if current_ratio is not None and current_ratio <= 1.25:
+            return None
+        if insider_pct <= 10:
+            return None
+
+        fin = t.financials
+        if fin is None or fin.empty:
+            return None
+
+        def _row(df, *names):
+            for n in names:
+                if n in df.index:
+                    return df.loc[n]
+            return None
+
+        rev_row  = _row(fin, "Total Revenue", "Revenue")
+        ebit_row = _row(fin, "EBIT", "Operating Income", "Ebit")
+        int_row  = _row(fin, "Interest Expense", "Interest Expense Non Operating")
+        ni_row   = _row(fin, "Net Income", "Net Income Common Stockholders")
+
+        revenues     = [v for v in (rev_row.values if rev_row is not None else [])
+                        if v is not None and not np.isnan(v)]
+        ebit         = ebit_row.iloc[0] if ebit_row is not None else None
+        interest_exp = abs(int_row.iloc[0] or 0) if int_row is not None else None
+        net_income   = ni_row.iloc[0] if ni_row is not None else None
+
+        if not net_income or net_income <= 0:
+            return None
+
+        def _cagr(years):
+            if len(revenues) <= years:
+                return None
+            r, p = revenues[0], revenues[years]
+            if not r or not p or p <= 0 or r <= 0:
+                return None
+            return (r / p) ** (1.0 / years) - 1
+
+        ttm_growth = _cagr(1)
+        growth_3y  = _cagr(3)
+
+        interest_coverage = None
+        if ebit is not None and interest_exp and interest_exp > 0:
+            interest_coverage = ebit / interest_exp
+
+        bs   = t.balance_sheet
+        roce = None
+        if bs is not None and not bs.empty and ebit is not None:
+            ta_row = _row(bs, "Total Assets")
+            cl_row = _row(bs, "Current Liabilities", "Total Current Liabilities")
+            if ta_row is not None and cl_row is not None:
+                ta = ta_row.iloc[0]
+                cl = cl_row.iloc[0]
+                if ta and cl and (ta - cl) > 0:
+                    roce = (ebit / (ta - cl)) * 100
+
+        # Quality filters (mirrors us_stock_screener.py apply_filters)
+        if current_ratio is not None and current_ratio <= 1.25:
+            return None
+        if interest_coverage is not None and interest_coverage <= 1:
+            return None
+        if insider_pct <= 10:
+            return None
+        if ttm_growth is not None and growth_3y is not None and ttm_growth <= growth_3y:
+            return None  # Require accelerating growth
+        if roce is not None and roce <= 2:
+            return None
+
+        exchange = _YF_EXCHANGE_MAP.get(info.get('exchange', ''), 'NYSE')
+
+        # Convert market cap: USD → INR Crores (1M USD * rate / 10 = Cr)
+        market_cap_cr = round(market_cap / 1e6 * DEFAULT_EXCHANGE_RATE / 10, 2) if market_cap else None
+
+        return {
+            'symbol':             symbol,
+            'company_name':       info.get('longName') or info.get('shortName') or symbol,
+            'exchange':           exchange,
+            'sector':             info.get('sector'),
+            'industry':           info.get('industry'),
+            'market_cap_cr':      market_cap_cr,
+            'pe_ratio':           info.get('trailingPE'),
+            'peg_ratio':          info.get('pegRatio'),
+            'book_value':         info.get('bookValue'),
+            'debt_to_equity':     info.get('debtToEquity'),
+            'current_price':      info.get('currentPrice') or info.get('regularMarketPrice'),
+            'previous_close':     info.get('previousClose'),
+            'week_52_high':       info.get('fiftyTwoWeekHigh'),
+            'week_52_low':        info.get('fiftyTwoWeekLow'),
+            'insider_pct':        round(insider_pct, 2),
+            'roce':               round(roce, 2) if roce is not None else None,
+            'year1_sales_growth': round(ttm_growth * 100, 1) if ttm_growth is not None else None,
+            'year3_sales_growth': round(growth_3y  * 100, 1) if growth_3y  is not None else None,
+        }
+    except Exception:
+        return None
+
+
+def _upsert_us_company(metrics):
+    """Insert or update one US company across screener_companies, derived_metrics_analysis, and screener_daily_prices."""
+    symbol = metrics['symbol']
+    sentiment = calculate_sentiment(
+        metrics.get('current_price'),
+        metrics.get('week_52_high'),
+        metrics.get('week_52_low'),
+    )
+    conn = sqlite3.connect(DATABASE_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            INSERT INTO screener_companies
+                (company_code, company_name, last_updated, created_at, source, exchange, enabled)
+            VALUES (?, ?, ?, ?, 'sync', ?, 1)
+            ON CONFLICT(company_code) DO UPDATE SET
+                company_name = excluded.company_name,
+                last_updated = excluded.last_updated,
+                exchange     = excluded.exchange,
+                enabled      = 1
+        """, (
+            symbol,
+            metrics.get('company_name'),
+            datetime.now(), datetime.now(),
+            metrics.get('exchange', 'NYSE'),
+        ))
+
+        cp = metrics.get('current_price')
+        if cp:
+            cursor.execute("""
+                INSERT OR REPLACE INTO screener_daily_prices
+                    (company_code, date, current_price, previous_close, week_52_high, week_52_low, updated_at)
+                VALUES (?, DATE('now'), ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (symbol, cp, metrics.get('previous_close'),
+                  metrics.get('week_52_high'), metrics.get('week_52_low')))
+
+        cursor.execute("""
+            INSERT INTO derived_metrics_analysis
+                (company_code, company_name, sector, industry,
+                 market_cap, pe_ratio, peg_ratio, book_value,
+                 roce, debt_to_equity,
+                 year1_sales_growth, year3_sales_growth,
+                 promoter_holding, sentiment_rating,
+                 exchange, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(company_code) DO UPDATE SET
+                company_name       = excluded.company_name,
+                sector             = excluded.sector,
+                industry           = excluded.industry,
+                market_cap         = excluded.market_cap,
+                pe_ratio           = excluded.pe_ratio,
+                peg_ratio          = excluded.peg_ratio,
+                book_value         = excluded.book_value,
+                roce               = excluded.roce,
+                debt_to_equity     = excluded.debt_to_equity,
+                year1_sales_growth = excluded.year1_sales_growth,
+                year3_sales_growth = excluded.year3_sales_growth,
+                promoter_holding   = excluded.promoter_holding,
+                sentiment_rating   = excluded.sentiment_rating,
+                exchange           = excluded.exchange,
+                updated_at         = CURRENT_TIMESTAMP
+        """, (
+            symbol,
+            metrics.get('company_name'),
+            metrics.get('sector'),
+            metrics.get('industry'),
+            metrics.get('market_cap_cr'),
+            metrics.get('pe_ratio'),
+            metrics.get('peg_ratio'),
+            metrics.get('book_value'),
+            metrics.get('roce'),
+            metrics.get('debt_to_equity'),
+            metrics.get('year1_sales_growth'),
+            metrics.get('year3_sales_growth'),
+            metrics.get('insider_pct'),  # stored in promoter_holding as proxy for insider %
+            sentiment,
+            metrics.get('exchange', 'NYSE'),
+        ))
+
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"  ✗ DB error for US company {symbol}: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def sync_us_companies():
+    """Daily US sync: Finviz pre-screen → yfinance deep metrics → DB upsert.
+
+    New companies passing filters are added; existing US companies that fall off
+    the filter are disabled (enabled=0).
+    """
+    logger.info("")
+    logger.info("="*80)
+    logger.info("SYNCING US COMPANIES (FINVIZ + YFINANCE)")
+    logger.info("="*80)
+
+    if not _FINVIZ_AVAILABLE:
+        logger.warning("finvizfinance / numpy not installed — skipping US sync.")
+        logger.warning("Install with: pip install finvizfinance numpy")
+        return
+
+    # Phase 1: Finviz pre-screen
+    symbols = _get_us_candidates_from_finviz()
+    if not symbols:
+        logger.info("No candidates returned from Finviz. Skipping US sync.")
+        return
+
+    # Phase 2: yfinance deep metrics + quality filters
+    logger.info(f"Phase 2: Fetching deep metrics for {len(symbols)} candidates...")
+    passing = []
+    for i, sym in enumerate(symbols, 1):
+        if i % 50 == 0:
+            logger.info(f"  Progress: {i}/{len(symbols)} checked, {len(passing)} passing")
+        m = _fetch_us_company_metrics(sym)
+        if m:
+            passing.append(m)
+        time.sleep(0.5)
+
+    logger.info(f"  {len(passing)} companies passed all filters")
+    if not passing:
+        logger.info("No US companies passed filters. Skipping DB update.")
+        return
+
+    passing_codes = {m['symbol'] for m in passing}
+
+    # Disable existing US companies no longer passing the filter
+    conn = sqlite3.connect(DATABASE_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT company_code FROM screener_companies
+        WHERE exchange IN ('NYSE', 'NASDAQ', 'AMEX') AND enabled = 1
+    """)
+    existing_us = {row[0] for row in cursor.fetchall()}
+    conn.close()
+
+    to_disable = existing_us - passing_codes
+    if to_disable:
+        conn = sqlite3.connect(DATABASE_PATH)
+        conn.execute(
+            f"UPDATE screener_companies SET enabled = 0 WHERE company_code IN ({','.join('?'*len(to_disable))})",
+            list(to_disable)
+        )
+        conn.commit()
+        conn.close()
+        logger.info(f"  Disabled {len(to_disable)} US companies that fell off filter")
+
+    # Upsert all passing companies; for new ones also pull EDGAR history
+    added = updated = failed = 0
+    if not _US_DOWNLOADER_AVAILABLE:
+        logger.warning("edgartools not installed — skipping US stock EDGAR sync")
+        return
+    edgar_downloader = USStockDownloader()
+    for m in passing:
+        was_existing = m['symbol'] in existing_us
+        if _upsert_us_company(m):
+            if was_existing:
+                updated += 1
+            else:
+                added += 1
+                logger.info(f"  + New US company: {m['symbol']} ({m.get('company_name')}) [{m.get('exchange')}]")
+                # Pull full financial history from EDGAR for new companies
+                try:
+                    edgar_data = edgar_downloader.download_company_data(m['symbol'])
+                    if edgar_data:
+                        import_screener_data_to_db(m['symbol'], edgar_data, source='sync')
+                        logger.info(f"    ✓ EDGAR history imported for {m['symbol']}")
+                except Exception as e:
+                    logger.warning(f"    ⚠ EDGAR import failed for {m['symbol']}: {e}")
+        else:
+            failed += 1
+
+    logger.info(f"✓ New: {added}  Updated: {updated}  Failed: {failed}  Disabled: {len(to_disable)}")
+    logger.info("="*80)
+
+
+def refresh_all_screener_data():
+    """Re-download Screener.in annual + quarterly financials for all enabled Indian companies."""
+    logger.info("="*80)
+    logger.info("REFRESH ALL: Re-scraping Screener.in annual data for all enabled Indian companies")
+    logger.info("="*80)
+    logger.info(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+    conn = sqlite3.connect(DATABASE_PATH)
+    rows = conn.execute("""
+        SELECT company_code, company_name FROM screener_companies
+        WHERE enabled = 1 AND (exchange IS NULL OR exchange IN ('NSE', 'BSE'))
+        ORDER BY company_code
+    """).fetchall()
+    conn.close()
+
+    total = len(rows)
+    logger.info(f"Found {total} enabled Indian companies to refresh\n")
+
+    ok = failed = 0
+    for i, (code, name) in enumerate(rows, 1):
+        logger.info(f"[{i}/{total}] {code} — {name}")
+        try:
+            if _refresh_screener_data(code):
+                ok += 1
+            else:
+                failed += 1
+        except Exception as e:
+            logger.info(f"  ✗ Unexpected error: {e}")
+            failed += 1
+        time.sleep(3)
+
+    logger.info("")
+    logger.info(f"✓ Refreshed: {ok}/{total}")
+    logger.info(f"✗ Failed:    {failed}/{total}")
     logger.info("="*80)
     logger.info(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("="*80)
@@ -1018,19 +1417,22 @@ def sync_single_company(company_code):
 if __name__ == "__main__":
     from lib import ScriptLock
 
-    # Parse --companies flag for targeted single-company sync
+    # Parse flags
     companies_arg = None
+    refresh_all = "--rescrape-annual-all" in sys.argv
     if "--companies" in sys.argv:
         idx = sys.argv.index("--companies") + 1
         if idx < len(sys.argv):
             companies_arg = sys.argv[idx].upper()
 
-    lock = ScriptLock('sync_companies', logger=logger)
+    lock = ScriptLock('discover_new_companies', logger=logger)
     if not lock.acquire():
         sys.exit(0)
     try:
         if companies_arg:
             sync_single_company(companies_arg)
+        elif refresh_all:
+            refresh_all_screener_data()
         else:
             main()
     finally:

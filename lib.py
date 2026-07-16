@@ -121,7 +121,9 @@ def get_database_connection():
     Returns:
         sqlite3.Connection: Database connection object
     """
-    return sqlite3.connect(str(DATABASE_PATH), timeout=30)
+    conn = sqlite3.connect(str(DATABASE_PATH), timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    return conn
 
 
 # ==============================================================================
@@ -356,7 +358,7 @@ def get_all_companies(conn):
     ensure_enabled_column(conn)
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT d.company_code, d.company_name
+        SELECT d.company_code, d.company_name, c.exchange
         FROM derived_metrics_analysis d
         JOIN screener_companies c ON d.company_code = c.company_code
         WHERE d.company_name IS NOT NULL AND c.enabled = 1

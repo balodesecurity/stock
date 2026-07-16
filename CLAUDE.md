@@ -17,6 +17,7 @@ cd /home/amitbalode/personnel/stock
 source /home/amitbalode/personnel/venv/bin/activate
 pip install -r requirements.txt
 # Note: requirements.txt is incomplete. Also install: streamlit yfinance pytz
+# For US stock sync also install: finvizfinance numpy
 ```
 
 ## Architecture & Data Flow
@@ -30,9 +31,10 @@ pip install -r requirements.txt
 └────────┬────────┴────────┬─────────┴──────────┬─────────────────┘
          │                 │                    │
          ▼                 ▼                    ▼
-  sync_new_companies  update_stock_        update_stock_
-  .py (11 AM daily)   prices_v2.py        prices_v2.py
-                       (hourly 9-3)        (--fundamentals 12 PM)
+  discover_new_companies      fetch_market_        fetch_market_
+  .py (11 AM daily)   data.py             data.py
+                       (--yahoo-daily-     (-i yahoo-price-and-recent-quarter
+                        change, hourly)     12 PM)
          │                 │                    │
          ▼                 ▼                    ▼
 ┌─────────────────────────────────────────────────────────────────┐
@@ -43,7 +45,7 @@ pip install -r requirements.txt
 └────────────────────────────┬────────────────────────────────────┘
                              │
                              ▼
-                   update_derived_metrics.py (12 PM daily)
+                   compute_growth_metrics.py (12 PM daily)
                              │
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
@@ -66,11 +68,14 @@ pip install -r requirements.txt
 
 | Script | Purpose | Schedule |
 |--------|---------|----------|
-| `sync_new_companies.py` | Sync new companies from Screener.in filter + static portfolio | Daily 11 AM |
-| `update_stock_prices_v2.py` | Fetch prices from Yahoo Finance | Hourly 9 AM-3 PM (quick), Daily 12 PM (--fundamentals) |
-| `update_derived_metrics.py` | Calculate all derived metrics from primary tables | Daily 12 PM |
+| `discover_new_companies.py` | Sync new companies from Screener.in filter + static portfolio + US Finviz screen | Daily 11 AM |
+| `discover_new_companies.py --rescrape-annual-all` | Re-scrape annual P&L, balance sheet, cash flow for ALL enabled Indian companies via ScreenerDownloader | Monthly (1st of month, 2 AM) |
+| `fetch_market_data.py` | Fetch prices + quarterly fundamentals from Yahoo Finance | Hourly 9 AM-3 PM (quick), Daily 12 PM (-i yahoo-price-and-recent-quarter) |
+| `compute_growth_metrics.py` | Calculate all derived metrics from primary tables | Daily 12 PM |
 | `cron_full_sync.sh` | Run all 3 crons in sequence (adhoc full sync) | Manual |
 | `backfill_sector_industry.py` | One-time/resume script to populate missing sector/industry; caches HTML in `cache/screener_html/` | Manual |
+
+**Important distinction:** `fetch_market_data.py -i yahoo-price-and-recent-quarter` fetches quarterly data from **Yahoo Finance** (fast, ~5 min). It does NOT update `screener_annual_pl`, `screener_balance_sheet`, or `screener_cash_flow`. Annual data (FY results) only comes from ScreenerDownloader via `discover_new_companies.py`. Run `--rescrape-annual-all` after FY results season (April–July) or whenever screener.in publishes consolidated annual data.
 
 ### Core Libraries
 
@@ -83,9 +88,10 @@ pip install -r requirements.txt
 ### Cron Schedule
 
 ```cron
-0 11 * * *         /home/amitbalode/personnel/stock/cron_sync_companies.sh
+0 11 * * *         /home/amitbalode/personnel/stock/cron_discover_new_companies.sh
 0 9-15 * * 1-5     /home/amitbalode/personnel/stock/cron_update_prices.sh
 0 12 * * 1-5       /home/amitbalode/personnel/stock/cron_update_fundamentals.sh
+0 2 1 * *          /home/amitbalode/personnel/stock/cron_refresh_annual.sh
 ```
 
 ## Database Schema
@@ -99,7 +105,7 @@ pip install -r requirements.txt
 **screener_ratios** - ROCE %, ROE %, Debtor Days, etc.
 **screener_shareholding** - Promoters+, FIIs+, DIIs+, Public+
 **screener_daily_prices** - current_price, previous_close, day_high, day_low, volume, week_52_high, week_52_low, updated_at
-**screener_companies** - company_code, company_name, enabled, created_at, source ('sync'/'manual')
+**screener_companies** - company_code, company_name, enabled, created_at, source ('sync'/'manual'), exchange ('NSE'/'BSE'/'NYSE'/'NASDAQ'/...)
 **portfolios** - portfolio_name, company_code (portfolios: 'Paytmmoney' = Amit's holdings, 'Static' = custom watchlist)
 **yahoo_ticker_cache** - Caches successful and failed Yahoo ticker resolutions (NULL ticker = failed; failures expire after `YAHOO_FAILED_CACHE_DAYS=30`)
 
@@ -107,9 +113,9 @@ pip install -r requirements.txt
 
 `source` distinguishes how a company entered the DB:
 - `'sync'` — discovered via the Screener.in filter (`https://www.screener.in/screens/3474068/vm/`) or `STATIC_PORTFOLIO` in `constants.py`
-- `'manual'` — explicitly added via the portal "Add Stock" form (calls `sync_new_companies.py --companies CODE`)
+- `'manual'` — explicitly added via the portal "Add Stock" form (calls `discover_new_companies.py --companies CODE`)
 
-`source` is recalculated on every successful `sync_new_companies.py` run. The update is **skipped entirely** if the filter returns 0 companies (guards against accidentally marking everything manual on a failed fetch).
+`source` is recalculated on every successful `discover_new_companies.py` run. The update is **skipped entirely** if the filter returns 0 companies (guards against accidentally marking everything manual on a failed fetch).
 
 `created_at` is set once at first insert and never overwritten on re-sync.
 
@@ -127,7 +133,7 @@ pip install -r requirements.txt
 | SSGR | ssgr, ssgr_prev, npm, nfat, dep_pct, dpr |
 | Valuation | net_profit, pe_ratio, peg_ratio, market_cap, book_value |
 | Balance Sheet | debt_to_equity |
-| Quality | star_rating (1-5), rating_score (0-100) — **LEGACY, not recalculated by update_derived_metrics.py** |
+| Quality | star_rating (1-5), rating_score (0-100) — **LEGACY, not recalculated by compute_growth_metrics.py** |
 | Promoter | promoter_holding, promoter_trend, promoter_trend_display |
 | Sentiment | sentiment_rating (1-5) — actively calculated from 52-week price position |
 | Price (via JOIN) | current_price, previous_close, volume, week_52_high, week_52_low |
@@ -214,10 +220,10 @@ Interpretation:
 position = (current_price - week_52_low) / (week_52_high - week_52_low) * 100
 >=80%: 5 (Very Bullish), >=60%: 4, >=40%: 3, >=20%: 2, <20%: 1 (Very Bearish)
 ```
-Calculated in `update_stock_prices_v2.py`, not `update_derived_metrics.py`.
+Calculated in `fetch_market_data.py`, not `compute_growth_metrics.py`.
 
 ### Star Rating — LEGACY (not actively updated)
-The `star_rating` and `rating_score` columns exist in `derived_metrics_analysis` but are **not recalculated** by `update_derived_metrics.py`. They are reference/historical data only.
+The `star_rating` and `rating_score` columns exist in `derived_metrics_analysis` but are **not recalculated** by `compute_growth_metrics.py`. They are reference/historical data only.
 
 ### Derived Metrics Calculations
 
@@ -260,17 +266,46 @@ STATIC_PORTFOLIO = [
     'NEWCOMPANY',  # Company Name
 ]
 ```
-Then run `python sync_new_companies.py` or wait for daily 11 AM sync. Sets `source='sync'`.
+Then run `python discover_new_companies.py` or wait for daily 11 AM sync. Sets `source='sync'`.
 
 ### Via Screener.in Filter
 Companies from `https://www.screener.in/screens/3474068/vm/` are automatically synced daily. Sets `source='sync'`.
 
+## Schema Migrations
+
+All schema changes are tracked as numbered SQL files in `migrations/`. Always write migrations to be backward compatible (use `ADD COLUMN ... DEFAULT ...` rather than destructive changes).
+
+### Applying to production
+
+```bash
+sqlite3 /home/amitbalode/personnel/derived_metrics_analysis.db < migrations/001_add_exchange_to_screener_companies.sql
+```
+
+### Migration history
+
+| # | File | Change |
+|---|------|--------|
+| 001 | `001_add_exchange_to_screener_companies.sql` | Added `exchange TEXT DEFAULT 'NSE'` to `screener_companies` — enables tracking non-Indian stocks (US, etc.) |
+| 002 | `002_drop_url_from_screener_companies.sql` | Dropped unused `url` column from `screener_companies` — was written but never read |
+| 003 | `003_drop_data_source_from_screener_companies.sql` | Dropped unused `data_source` column from `screener_companies` — was written but never read |
+
+### Exchange values
+
+| Exchange | Notes |
+|----------|-------|
+| `NSE` | Indian — default for all pre-existing companies |
+| `BSE` | Indian — BSE-only listings |
+| `NYSE` | US |
+| `NASDAQ` | US |
+
+Yahoo Finance ticker suffixes (in `constants.py`): `.NS` = NSE, `.BO` = BSE, no suffix = US.
+
 ## Adding New Metrics
 
-1. Add calculation function to `update_derived_metrics.py`
+1. Add calculation function to `compute_growth_metrics.py`
 2. Call it from `update_all_metrics()` function
 3. Add any new constants to `constants.py`
-4. Test: `python update_derived_metrics.py`
+4. Test: `python compute_growth_metrics.py`
 
 ## Adding New Data Extraction
 
@@ -286,7 +321,7 @@ Log files in `logs/` with daily rotation:
 stock_prices_quick_YYYYMMDD.log    (hourly price updates)
 stock_prices_full_YYYYMMDD.log     (daily fundamentals)
 derived_metrics_YYYYMMDD.log       (daily metrics recalculation)
-sync_companies_YYYYMMDD.log        (daily company sync)
+discover_new_companies_YYYYMMDD.log        (daily company sync)
 ```
 
 Format: `YYYY-MM-DD HH:MM:SS - LEVEL - MESSAGE`
@@ -345,26 +380,24 @@ SELECT source, COUNT(*) FROM screener_companies GROUP BY source;
 source /home/amitbalode/personnel/venv/bin/activate
 
 # Manual price update (force outside market hours)
-python update_stock_prices_v2.py --force
-
+python fetch_market_data.py -i yahoo-daily-change
 # Manual fundamentals + metrics update
-python update_stock_prices_v2.py --fundamentals --force
-python update_derived_metrics.py
+python fetch_market_data.py -i yahoo-price-and-recent-quarterpython compute_growth_metrics.py
 
 # Sync new companies
-python sync_new_companies.py
+python discover_new_companies.py
+
+# Re-scrape annual P&L, balance sheet, cash flow for ALL Indian companies (run during results season)
+python discover_new_companies.py --rescrape-annual-all
 
 # Full adhoc sync (all 3 crons in sequence)
 bash cron_full_sync.sh
 
 # Add a single company by code
-python sync_new_companies.py --companies TICKER
+python discover_new_companies.py --companies TICKER
 
-# Start portal
+# Start portal locally
 streamlit run stock_portal.py --server.port 8501 --server.headless true
-
-# SSH tunnel (run on Mac to access portal at localhost:8501)
-ssh -N -L 8501:localhost:8501 amitbalode@192.168.1.85
 ```
 
 ## Claude Slash Commands
@@ -376,3 +409,67 @@ ssh -N -L 8501:localhost:8501 amitbalode@192.168.1.85
 - screener.in: 2-3 second delay between requests
 - Yahoo Finance: Bulk fetching in batches of 50 stocks (price), 10 (fundamentals), 0.5s delay
 - Price updates only during market hours (9:15 AM - 3:30 PM IST, Mon-Fri); use `--force` to override
+
+## Docker & Cloud Deployment
+
+### Overview
+The portal runs as a Docker container on AWS EC2, accessible at **https://alphavest.in**
+
+### Infrastructure
+| Resource | Value |
+|----------|-------|
+| **Domain** | `alphavest.in` (BigRock registrar, Cloudflare DNS + SSL) |
+| **EC2 Instance** | `i-0e84f65e1c1b066ef`, `t3.micro`, `ap-south-1` (Mumbai) |
+| **Elastic IP** | `13.204.149.14` (permanent, won't change on stop/start) |
+| **ECR Repository** | `782818417773.dkr.ecr.ap-south-1.amazonaws.com/stock-portal` |
+| **AWS Account** | `782818417773`, IAM user `amitbalode.work` |
+| **SSH Key** | `~/.ssh/stock-portal-key.pem` |
+| **DB on EC2** | `/home/ec2-user/derived_metrics_analysis.db` |
+
+### SSH into EC2
+```bash
+ssh -i ~/.ssh/stock-portal-key.pem ec2-user@13.204.149.14
+```
+
+### Copy DB from Mac to EC2
+```bash
+scp -i ~/.ssh/stock-portal-key.pem \
+  /Users/abalode/personnel/derived_metrics_analysis.db \
+  ec2-user@13.204.149.14:/home/ec2-user/derived_metrics_analysis.db
+```
+
+### Redeploy after code changes
+```bash
+# 1. Build for linux/amd64 (EC2 is x86_64, Mac is ARM — must specify platform)
+cd /Users/abalode/personnel/stock
+docker buildx build --platform linux/amd64 -t stock-portal:amd64 --load .
+
+# 2. Push to ECR
+aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin 782818417773.dkr.ecr.ap-south-1.amazonaws.com
+docker tag stock-portal:amd64 782818417773.dkr.ecr.ap-south-1.amazonaws.com/stock-portal:latest
+docker push 782818417773.dkr.ecr.ap-south-1.amazonaws.com/stock-portal:latest
+
+# 3. Pull and restart on EC2
+ssh -i ~/.ssh/stock-portal-key.pem ec2-user@13.204.149.14 \
+  "aws ecr get-login-password --region ap-south-1 | docker login --username AWS --password-stdin 782818417773.dkr.ecr.ap-south-1.amazonaws.com && \
+   docker pull 782818417773.dkr.ecr.ap-south-1.amazonaws.com/stock-portal:latest && \
+   docker stop stock-portal && docker rm stock-portal && \
+   docker run -d --name stock-portal --restart unless-stopped -p 8501:8501 \
+   -v /home/ec2-user/derived_metrics_analysis.db:/app/derived_metrics_analysis.db \
+   782818417773.dkr.ecr.ap-south-1.amazonaws.com/stock-portal:latest"
+```
+
+### Local dev with Docker
+```bash
+cd /Users/abalode/personnel/stock
+docker-compose up --build   # first time
+docker-compose up           # subsequent runs
+docker-compose down         # stop
+```
+Portal available at http://localhost:8501
+
+### Architecture
+- **Cloudflare** sits in front — handles SSL (Flexible mode), DNS, DDoS protection
+- **Nginx** on EC2 — reverse proxy from port 80 → Streamlit on port 8501
+- **Docker container** — runs Streamlit portal, mounts DB as volume
+- **WebSockets** — enabled in Cloudflare (required for Streamlit real-time UI)

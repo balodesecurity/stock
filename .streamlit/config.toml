@@ -1,7 +1,11 @@
+[server]
+sslCertFile = "/Users/abalode/.streamlit/certs/cert.pem"
+sslKeyFile  = "/Users/abalode/.streamlit/certs/key.pem"
+
 [theme]
 base = "dark"
-backgroundColor = "#0d1117"
-secondaryBackgroundColor = "#161b22"
-textColor = "#e6edf3"
-primaryColor = "#58a6ff"
+backgroundColor = "#0b0e1a"
+secondaryBackgroundColor = "#111827"
+textColor = "#f1f5f9"
+primaryColor = "#818cf8"
 font = "sans serif"

@@ -1,0 +1,10 @@
+services:
+  stock-portal:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      # Mac local path — change to /home/ec2-user/... when deploying on EC2
+      - /Users/abalode/personnel/derived_metrics_analysis.db:/app/derived_metrics_analysis.db
+      - /Users/abalode/personnel/stock/logs:/app/stock/logs
+    restart: unless-stopped

@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.db
+logs/
+cache/
+*.log
+.git/
+.streamlit/
+stock_portal_old.py
+backfill_*.py
+cron_*.sh
+migrations/
+*.md

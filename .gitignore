@@ -37,3 +37,16 @@ cache/
 *.key
 *.p12
 *.pem
+
+# Secrets
+.streamlit/secrets.toml
+secrets.toml
+
+# Terraform state and provider cache
+terraform/.terraform/
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/.terraform.lock.hcl
+
+# Claude memory
+memory/

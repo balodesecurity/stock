@@ -78,7 +78,6 @@ class ScreenerDownloader:
                 'company_code': company_code,
                 'company_name': company_name,
                 'report_type': report_type,
-                'url': url,
                 'sector': sector_industry['sector'],
                 'industry': sector_industry['industry'],
                 'quarterly_results': self._extract_quarterly_results(soup),

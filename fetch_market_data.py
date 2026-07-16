@@ -119,7 +119,9 @@ def check_quarter_exists(cursor, company_code, metric, quarter):
     """, (company_code, metric, quarter))
     return cursor.fetchone()[0] > 0
 
-def _save_price_data(cursor, code, ticker_symbol, close, high, low, volume, today, logger):
+_INDIAN_SUFFIXES = ('.NS', '.BO', '-SM.NS')
+
+def _save_price_data(cursor, code, ticker_symbol, close, high, low, volume, today, logger, exchange_rate=None):
     """Save price data and update market cap for a single company.
 
     Fetches previous_close, 52-week high/low, and marketCap from Yahoo Finance,
@@ -146,17 +148,26 @@ def _save_price_data(cursor, code, ticker_symbol, close, high, low, volume, toda
         pe_ratio = None
         peg_ratio = None
         book_value = None
+        debt_to_equity = None
         try:
             info = yf.Ticker(ticker_symbol).info
             week_52_high = info.get('fiftyTwoWeekHigh', close)
             week_52_low = info.get('fiftyTwoWeekLow', close)
             raw_market_cap = info.get('marketCap')
             if raw_market_cap:
-                # marketCap from Yahoo is in INR for .NS/.BO stocks; convert to Crores
-                market_cap_crores = round(raw_market_cap / 10000000, 2)
+                if exchange_rate and not any(ticker_symbol.endswith(s) for s in _INDIAN_SUFFIXES):
+                    # US ticker: Yahoo returns USD — convert to INR Crores
+                    market_cap_crores = round(convert_to_crores(raw_market_cap, exchange_rate), 2)
+                else:
+                    # Indian ticker: Yahoo returns INR — convert to Crores
+                    market_cap_crores = round(raw_market_cap / 10000000, 2)
             pe_ratio = info.get('trailingPE')
             peg_ratio = info.get('pegRatio')
             book_value = info.get('bookValue')
+            raw_de = info.get('debtToEquity')
+            if raw_de is not None:
+                # Yahoo returns D/E as a percentage (e.g. 45.2 means 0.452x) — normalise to ratio
+                debt_to_equity = round(raw_de / 100, 4)
             # Calculate PEG if not available
             if not peg_ratio:
                 pe = info.get('trailingPE') or info.get('forwardPE')
@@ -189,6 +200,9 @@ def _save_price_data(cursor, code, ticker_symbol, close, high, low, volume, toda
         if book_value is not None:
             updates.append("book_value = ?")
             params.append(book_value)
+        if debt_to_equity is not None:
+            updates.append("debt_to_equity = ?")
+            params.append(debt_to_equity)
 
         # Calculate sentiment rating from 52-week position
         if week_52_high > week_52_low:
@@ -275,20 +289,14 @@ def _cache_ticker(cursor, company_code, resolved_ticker):
     """, (company_code, resolved_ticker, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
 
 
-def update_prices_quick(force=False, company_filter=None):
+def update_prices_quick(company_filter=None):
     """Quick price update (hourly) - Updates screener_daily_prices table
 
     Args:
-        force: Skip market hours check
         company_filter: Optional list of company codes to update (default: all)
     """
 
     logger = setup_logger('quick')
-
-    # Check if market is open (skip if not, unless forced)
-    if not force and not is_market_hours():
-        logger.info("Market is closed. Skipping quick update.")
-        return
 
     conn = sqlite3.connect(DATABASE_PATH, timeout=30)
     cursor = conn.cursor()
@@ -303,16 +311,26 @@ def update_prices_quick(force=False, company_filter=None):
     # Ensure ticker cache table exists
     _ensure_ticker_cache(conn)
 
-    # Get company codes (filtered or all, skip disabled)
+    # When targeting specific companies, wipe any failed-ticker cache entries so
+    # the resolution is retried rather than silently skipped for 30 days.
+    if company_filter:
+        placeholders_fc = ','.join('?' for _ in company_filter)
+        conn.execute(
+            f"DELETE FROM yahoo_ticker_cache WHERE company_code IN ({placeholders_fc}) AND resolved_ticker IS NULL",
+            company_filter
+        )
+        conn.commit()
+
+    # Get company codes with exchange (filtered or all, skip disabled)
     try:
         if company_filter:
             placeholders = ','.join('?' for _ in company_filter)
-            cursor.execute(f"""SELECT d.company_code FROM derived_metrics_analysis d
+            cursor.execute(f"""SELECT d.company_code, c.exchange FROM derived_metrics_analysis d
                               JOIN screener_companies c ON d.company_code = c.company_code
                               WHERE d.company_code IN ({placeholders}) AND d.company_name IS NOT NULL AND c.enabled = 1""",
                            company_filter)
         else:
-            cursor.execute("""SELECT d.company_code FROM derived_metrics_analysis d
+            cursor.execute("""SELECT d.company_code, c.exchange FROM derived_metrics_analysis d
                              JOIN screener_companies c ON d.company_code = c.company_code
                              WHERE d.company_name IS NOT NULL AND c.enabled = 1""")
     except sqlite3.OperationalError as e:
@@ -320,14 +338,17 @@ def update_prices_quick(force=False, company_filter=None):
         logger.error("DATABASE_PATH = %s (exists=%s)", DATABASE_PATH, os.path.exists(DATABASE_PATH))
         conn.close()
         return
-    all_companies = [row[0] for row in cursor.fetchall()]
 
-    # Split companies by cache status
+    rows = cursor.fetchall()
+    us_companies  = [code for code, exchange in rows if exchange in ('NYSE', 'NASDAQ', 'AMEX')]
+    india_codes   = [code for code, exchange in rows if exchange not in ('NYSE', 'NASDAQ', 'AMEX')]
+
+    # Split India companies by cache status
     companies = []          # Companies to fetch via batch (.NS)
     cached_tickers = {}     # company_code -> resolved_ticker (for direct fetch)
     skipped_cached = 0
 
-    for code in all_companies:
+    for code in india_codes:
         resolved_ticker, is_cached = _get_cached_ticker(cursor, code)
         if is_cached and resolved_ticker:
             # Known good ticker — fetch directly, skip batch
@@ -346,7 +367,7 @@ def update_prices_quick(force=False, company_filter=None):
     logger.info("QUICK UPDATE: STOCK PRICES FROM YAHOO FINANCE")
     logger.info("=" * 100)
     logger.info(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info(f"Total companies: {len(all_companies)}")
+    logger.info(f"Total companies: {len(rows)} (India: {len(india_codes)}, US: {len(us_companies)})")
     if skipped_cached:
         logger.info(f"Skipped (cached failures, {YAHOO_FAILED_CACHE_DAYS}d): {skipped_cached}")
     if cached_tickers:
@@ -355,32 +376,51 @@ def update_prices_quick(force=False, company_filter=None):
     updated = 0
     failed = 0
 
+    # --- Phase 0: US companies — fetch directly, no suffix resolution needed ---
+    if us_companies:
+        logger.info(f"Phase 0: Updating {len(us_companies)} US company prices...")
+        exchange_rate = get_exchange_rate()
+        for code in us_companies:
+            try:
+                info = yf.Ticker(code).info
+                close_us = info.get('currentPrice') or info.get('regularMarketPrice')
+                if not close_us or close_us <= 0:
+                    failed += 1
+                    continue
+                high_us   = info.get('dayHigh', close_us)
+                low_us    = info.get('dayLow', close_us)
+                volume_us = info.get('volume', 0) or 0
+                if _save_price_data(cursor, code, code, close_us, high_us, low_us, volume_us, today, logger, exchange_rate=exchange_rate):
+                    updated += 1
+                else:
+                    failed += 1
+            except Exception:
+                failed += 1
+        conn.commit()
+
     # --- Phase 1: Fetch companies with known cached tickers directly ---
+    # Use .info['currentPrice'] (live) — yf.download(period='1d') and fast_info both
+    # return the last COMPLETED session close, missing the intraday / most-recent price.
     if cached_tickers:
         total_cached = len(cached_tickers)
         for idx, (code, ticker) in enumerate(cached_tickers.items(), 1):
             if idx == 1 or idx % 50 == 0 or idx == total_cached:
                 logger.info(f"⏳ Phase 1: fetching cached tickers {idx}/{total_cached} ✓{updated} ✗{failed}...")
             try:
-                data_fb = yf.download(ticker, period='1d', progress=False)
-                close_fb = float(data_fb['Close'].values.flat[-1])
-                high_fb = float(data_fb['High'].values.flat[-1])
-                low_fb = float(data_fb['Low'].values.flat[-1])
-                volume_fb = int(data_fb['Volume'].values.flat[-1])
-
-                if close_fb > 0:
-                    if _save_price_data(cursor, code, ticker, close_fb, high_fb, low_fb, volume_fb, today, logger):
-                        updated += 1
-                    else:
-                        failed += 1
+                info = yf.Ticker(ticker).info
+                close_fb = info.get('currentPrice') or info.get('regularMarketPrice')
+                if not close_fb or close_fb <= 0:
+                    failed += 1
+                    continue
+                high_fb   = info.get('dayHigh',  close_fb)
+                low_fb    = info.get('dayLow',   close_fb)
+                volume_fb = int(info.get('volume', 0) or 0)
+                if _save_price_data(cursor, code, ticker, close_fb, high_fb, low_fb, volume_fb, today, logger):
+                    updated += 1
                 else:
                     failed += 1
-            except (KeyError, IndexError, ValueError):
-                # Yahoo responded but returned no valid data — ticker is likely delisted
-                _cache_ticker(cursor, code, None)
-                failed += 1
             except Exception:
-                # Network/connection error — preserve the cached ticker for next run
+                # Ticker may be delisted or network error — preserve cache
                 failed += 1
         conn.commit()
 
@@ -412,12 +452,19 @@ def update_prices_quick(force=False, company_filter=None):
                 ticker = f"{code}.NS"
 
                 try:
-                    # Handle both single and multi-ticker responses
+                    # Handle both single and multi-ticker responses.
+                    # Single-stock: use fast_info (live price) — yf.download(period='1d')
+                    # returns the last COMPLETED session close, missing the intraday price.
                     if len(batch) == 1:
-                        close = data['Close'].iloc[-1]
-                        high = data['High'].iloc[-1]
-                        low = data['Low'].iloc[-1]
-                        volume = data['Volume'].iloc[-1]
+                        # Single stock (e.g. portal add): use .info for live current price.
+                        # yf.download(period='1d') returns last completed session close — stale.
+                        info_s = yf.Ticker(ticker).info
+                        close  = info_s.get('currentPrice') or info_s.get('regularMarketPrice')
+                        if not close or close <= 0:
+                            raise ValueError(f"No live price in .info for {ticker}")
+                        high   = info_s.get('dayHigh',  close)
+                        low    = info_s.get('dayLow',   close)
+                        volume = int(info_s.get('volume', 0) or 0)
                     else:
                         close = data[ticker]['Close'].iloc[-1]
                         high = data[ticker]['High'].iloc[-1]
@@ -521,7 +568,7 @@ def update_prices_quick(force=False, company_filter=None):
 
     conn.close()
 
-    total_attempted = len(companies) + len(cached_tickers)
+    total_attempted = len(companies) + len(cached_tickers) + len(us_companies)
     logger.info("=" * 100)
     logger.info(f"✓ Updated: {updated}/{total_attempted}")
     logger.info(f"✗ Failed: {failed}/{total_attempted}")
@@ -531,8 +578,12 @@ def update_prices_quick(force=False, company_filter=None):
     logger.info(f"Completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("=" * 100)
 
-def update_fundamentals_for_company(cursor, company_code, exchange_rate):
+def update_fundamentals_for_company(cursor, company_code, exchange_rate, exchange=None):
     """Update quarterly and annual fundamentals for one company"""
+
+    # US companies have no screener_quarterly data — metrics come from yfinance via sync
+    if exchange in ('NYSE', 'NASDAQ', 'AMEX'):
+        return 0, 0
 
     # Try both suffixes
     ticker_obj = None
@@ -627,11 +678,12 @@ def update_fundamentals_for_company(cursor, company_code, exchange_rate):
 
                     yahoo_value = float(yahoo_value)
 
-                    # Convert to Crores (except EPS which is per share)
+                    # yfinance returns INR for Indian stocks (.NS/.BO) — just divide by 1 Crore
+                    # (convert_to_crores is for USD→INR and would over-inflate by exchange_rate)
                     if screener_field == 'EPS in Rs':
-                        screener_value = yahoo_value * exchange_rate  # Already per share
+                        screener_value = yahoo_value  # INR per share, no conversion needed
                     else:
-                        screener_value = convert_to_crores(yahoo_value, exchange_rate)
+                        screener_value = yahoo_value / 10_000_000  # INR → Crores
 
                     screener_value_str = f"{screener_value:,.0f}"
 
@@ -647,11 +699,10 @@ def update_fundamentals_for_company(cursor, company_code, exchange_rate):
 
     return inserted, skipped
 
-def update_fundamentals_full(force=False, company_filter=None):
+def update_fundamentals_full(company_filter=None):
     """Full fundamentals update (daily) - Updates screener_quarterly, etc.
 
     Args:
-        force: Skip market hours check
         company_filter: Optional list of company codes to update (default: all)
     """
 
@@ -671,12 +722,12 @@ def update_fundamentals_full(force=False, company_filter=None):
     try:
         if company_filter:
             placeholders = ','.join('?' for _ in company_filter)
-            cursor.execute(f"""SELECT d.company_code FROM derived_metrics_analysis d
+            cursor.execute(f"""SELECT d.company_code, c.exchange FROM derived_metrics_analysis d
                               JOIN screener_companies c ON d.company_code = c.company_code
                               WHERE d.company_code IN ({placeholders}) AND d.company_name IS NOT NULL AND c.enabled = 1""",
                            company_filter)
         else:
-            cursor.execute("""SELECT d.company_code FROM derived_metrics_analysis d
+            cursor.execute("""SELECT d.company_code, c.exchange FROM derived_metrics_analysis d
                              JOIN screener_companies c ON d.company_code = c.company_code
                              WHERE d.company_name IS NOT NULL AND c.enabled = 1""")
     except sqlite3.OperationalError as e:
@@ -684,20 +735,22 @@ def update_fundamentals_full(force=False, company_filter=None):
         logger.error("DATABASE_PATH = %s (exists=%s)", DATABASE_PATH, os.path.exists(DATABASE_PATH))
         conn.close()
         return
-    companies = [row[0] for row in cursor.fetchall()]
+    companies = cursor.fetchall()  # list of (company_code, exchange)
 
     logger.info("=" * 100)
     logger.info("FULL UPDATE: PRICES + FUNDAMENTALS FROM YAHOO FINANCE")
     logger.info("=" * 100)
     logger.info(f"Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    logger.info(f"Total companies: {len(companies)}")
+    india_count = sum(1 for _, ex in companies if ex not in ('NYSE', 'NASDAQ', 'AMEX'))
+    us_count    = len(companies) - india_count
+    logger.info(f"Total companies: {len(companies)} (India: {india_count}, US: {us_count} — skipped for fundamentals)")
     logger.info(f"Mode: Updating prices + quarterly fundamentals")
 # blank line
 
     # First, do quick price update
     logger.info("Step 1: Updating prices...")
     conn.close()
-    update_prices_quick(force=True, company_filter=company_filter)
+    update_prices_quick(company_filter=company_filter)
 
     # Reconnect for fundamentals
     conn = sqlite3.connect(DATABASE_PATH, timeout=30)
@@ -716,12 +769,12 @@ def update_fundamentals_full(force=False, company_filter=None):
     total_skipped = 0
     processed = 0
 
-    for idx, company_code in enumerate(companies, 1):
+    for idx, (company_code, exchange) in enumerate(companies, 1):
         try:
             if idx % 10 == 0:
                 logger.info(f"  Progress: {idx}/{len(companies)} companies processed...")
 
-            inserted, skipped = update_fundamentals_for_company(cursor, company_code, exchange_rate)
+            inserted, skipped = update_fundamentals_for_company(cursor, company_code, exchange_rate, exchange=exchange)
             total_inserted += inserted
             total_skipped += skipped
             processed += 1
@@ -752,21 +805,19 @@ def update_fundamentals_full(force=False, company_filter=None):
 
 if __name__ == "__main__":
     import sys
+    import argparse
     from lib import ScriptLock
 
-    force = "--force" in sys.argv
-    fundamentals = "--fundamentals" in sys.argv
+    MODES = ['yahoo-daily-change', 'yahoo-price-and-recent-quarter']
 
-    # Parse --companies CODE1 CODE2 ... (all args after --companies until next flag)
-    company_filter = None
-    if "--companies" in sys.argv:
-        idx = sys.argv.index("--companies") + 1
-        codes = []
-        while idx < len(sys.argv) and not sys.argv[idx].startswith("--"):
-            codes.append(sys.argv[idx].upper())
-            idx += 1
-        if codes:
-            company_filter = codes
+    parser = argparse.ArgumentParser(description='Fetch market data from Yahoo Finance')
+    parser.add_argument('-i', required=True, choices=MODES, metavar='MODE',
+                        help=f'Mode: {" | ".join(MODES)}')
+    parser.add_argument('--companies', nargs='+', metavar='CODE', help='Limit to specific company codes')
+    args = parser.parse_args()
+
+    company_filter = [c.upper() for c in args.companies] if args.companies else None
+    fundamentals = args.i == 'yahoo-price-and-recent-quarter'
 
     lock_name = 'stock_prices_full' if fundamentals else 'stock_prices_quick'
     lock = ScriptLock(lock_name)
@@ -774,10 +825,8 @@ if __name__ == "__main__":
         sys.exit(0)
     try:
         if fundamentals:
-            # Full update: Prices + Fundamentals (daily at 12 PM)
-            update_fundamentals_full(force=force, company_filter=company_filter)
+            update_fundamentals_full(company_filter=company_filter)
         else:
-            # Quick update: Prices only (hourly)
-            update_prices_quick(force=force, company_filter=company_filter)
+            update_prices_quick(company_filter=company_filter)
     finally:
         lock.release()

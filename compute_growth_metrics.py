@@ -933,6 +933,18 @@ def update_all_metrics():
     except Exception:
         pass  # Column already exists
 
+    # Backfill company_name from screener_companies for any rows where it is NULL
+    # (happens when Yahoo Finance couldn't resolve the name at add time)
+    cursor.execute(f"""
+        UPDATE {TABLE_DERIVED}
+        SET company_name = (
+            SELECT company_name FROM screener_companies
+            WHERE screener_companies.company_code = {TABLE_DERIVED}.company_code
+        )
+        WHERE company_name IS NULL OR company_name = ''
+    """)
+    conn.commit()
+
     # Get all companies
     companies = get_all_companies(conn)
 
@@ -960,7 +972,10 @@ def update_all_metrics():
         'no_data': 0
     }
 
-    for idx, (company_code, company_name) in enumerate(companies, 1):
+    _us_exchanges = {'NYSE', 'NASDAQ', 'AMEX'}
+
+    for idx, (company_code, company_name, exchange) in enumerate(companies, 1):
+        _is_us = exchange in _us_exchanges
 
         # 1. Calculate Profit Growth (Q-o-Q and Y-o-Y)
         qoq_growth, qoq_prev, yoy_profit_growth, latest_quarter, prev_quarter = calculate_profit_growth(cursor, company_code)
@@ -971,8 +986,11 @@ def update_all_metrics():
         # 3. Get ROCE
         roce = get_latest_roce(cursor, company_code)
 
-        # 4. Calculate Promoter Trend
-        promoter_trend, promoter_trend_display, promoter_holding = calculate_promoter_trend(cursor, company_code)
+        # 4. Calculate Promoter Trend (India only — US stores insider % from yfinance, don't overwrite)
+        if _is_us:
+            promoter_trend = promoter_trend_display = promoter_holding = None
+        else:
+            promoter_trend, promoter_trend_display, promoter_holding = calculate_promoter_trend(cursor, company_code)
 
         # 5. Calculate Sentiment Rating
         sentiment_rating = calculate_sentiment_rating(cursor, company_code)
@@ -1011,9 +1029,9 @@ def update_all_metrics():
                 yoy_sales_growth = ?,
                 latest_quarter = ?,
                 roce = ?,
-                promoter_holding = ?,
-                promoter_trend = ?,
-                promoter_trend_display = ?,
+                promoter_holding = CASE WHEN ? THEN promoter_holding ELSE ? END,
+                promoter_trend = CASE WHEN ? THEN promoter_trend ELSE ? END,
+                promoter_trend_display = CASE WHEN ? THEN promoter_trend_display ELSE ? END,
                 sentiment_rating = ?,
                 total_fcf = ?,
                 fcf_cfo_ratio = ?,
@@ -1021,8 +1039,8 @@ def update_all_metrics():
                 fcf_category = ?,
                 npm = ?,
                 debt_to_equity = ?,
-                year1_sales_growth = ?,
-                year2_sales_growth = ?,
+                year1_sales_growth = COALESCE(?, year1_sales_growth),
+                year2_sales_growth = COALESCE(?, year2_sales_growth),
                 ssgr = ?,
                 ssgr_prev = ?,
                 prev_quarter = ?
@@ -1034,9 +1052,9 @@ def update_all_metrics():
             yoy_sales_growth,
             latest_quarter,
             roce,
-            promoter_holding,
-            promoter_trend,
-            promoter_trend_display,
+            _is_us, promoter_holding,
+            _is_us, promoter_trend,
+            _is_us, promoter_trend_display,
             sentiment_rating,
             total_fcf,
             fcf_cfo_ratio,
