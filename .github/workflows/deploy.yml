@@ -1,0 +1,54 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches-ignore:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image to ECR
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: 782818417773.dkr.ecr.ap-south-1.amazonaws.com/stock-portal:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Deploy on EC2
+        uses: appleboy/ssh-action@v1
+        with:
+          host: 13.204.149.14
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            aws ecr get-login-password --region ap-south-1 \
+              | docker login --username AWS --password-stdin \
+                782818417773.dkr.ecr.ap-south-1.amazonaws.com
+            docker pull 782818417773.dkr.ecr.ap-south-1.amazonaws.com/stock-portal:latest
+            docker stop stock-portal && docker rm stock-portal
+            docker run -d --name stock-portal --restart unless-stopped -p 8501:8501 \
+              -v /home/ec2-user/derived_metrics_analysis.db:/app/derived_metrics_analysis.db \
+              -v /home/ec2-user/.streamlit/secrets.toml:/root/.streamlit/secrets.toml \
+              782818417773.dkr.ecr.ap-south-1.amazonaws.com/stock-portal:latest
