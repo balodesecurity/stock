@@ -9,7 +9,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 
 resource "aws_ecr_repository" "stock_portal" {
-  name = "stock-portal"
+  name = var.ecr_repository_name
 
   # MUTABLE means the "latest" tag can be overwritten on each deploy.
   # This is intentional — we always pull the newest "latest" image on EC2.

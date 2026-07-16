@@ -8,8 +8,8 @@
 #   - EIP Association : binds the Elastic IP to the EC2 instance
 #
 # Traffic flow:
-#   Internet → Cloudflare (SSL) → Elastic IP → Nginx (port 80)
-#                                             → Docker container (port 8501)
+#   Internet -> Cloudflare (SSL) -> Elastic IP -> Nginx (port 80)
+#                                              -> Docker container (port 8501)
 # ──────────────────────────────────────────────────────────────────────────────
 
 # Security Group — EC2 firewall.
@@ -18,8 +18,8 @@ resource "aws_security_group" "stock_portal" {
   name        = "stock-portal-sg"
   description = "Stock portal access"
 
-  # The default VPC in ap-south-1. We use the default to keep networking simple.
-  vpc_id = "vpc-0eb73af5cc8c2c196"
+  # VPC to deploy into — see variables.tf
+  vpc_id = var.vpc_id
 
   ingress {
     description = "SSH - for manual access and debugging"
@@ -68,20 +68,17 @@ resource "aws_security_group" "stock_portal" {
 
 # EC2 Instance — the virtual machine that runs the portal.
 resource "aws_instance" "stock_portal" {
-  # Amazon Linux 2023 AMI (ap-south-1). If you ever need to replace this
-  # instance, use the same AMI or find the latest AL2023 AMI for ap-south-1.
-  ami = "ami-0f9235932f10668d4"
+  # Amazon Machine Image — the OS template for the instance. See variables.tf.
+  ami = var.ami_id
 
-  # t3.micro = 2 vCPUs, 1 GB RAM. Enough for the portal + cron jobs.
-  # Upgrade to t3.small (2 GB) if the portal feels slow under load.
-  instance_type = "t3.micro"
+  # Instance size — see variables.tf for details and upgrade options.
+  instance_type = var.instance_type
 
-  # SSH key pair name (created manually in AWS). The private key is at
-  # ~/.ssh/stock-portal-key.pem — keep it safe, it can't be recovered.
-  key_name = "stock-portal-key"
+  # SSH key pair — see variables.tf. Private key is at ~/.ssh/stock-portal-key.pem.
+  key_name = var.key_pair_name
 
-  # Subnet inside the default VPC. ap-south-1a availability zone.
-  subnet_id = "subnet-096c527e723807074"
+  # Subnet inside the VPC — see variables.tf.
+  subnet_id = var.subnet_id
 
   vpc_security_group_ids = [aws_security_group.stock_portal.id]
 

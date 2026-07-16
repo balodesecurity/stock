@@ -5,10 +5,10 @@
 # Without this, the EC2 can't pull Docker images from ECR or read secrets.
 #
 # Structure:
-#   IAM Role → trusted by EC2 service
-#     ├── Policy: ECR read-only  (pull Docker images)
-#     └── Policy: SSM get-parameter  (read secrets.toml at boot)
-#   IAM Instance Profile → attaches the role to the EC2 instance
+#   IAM Role -> trusted by EC2 service
+#     +-- Policy: ECR read-only        (pull Docker images)
+#     +-- Policy: SSM get-parameter    (read secrets.toml at boot)
+#   IAM Instance Profile -> attaches the role to the EC2 instance
 # ──────────────────────────────────────────────────────────────────────────────
 
 # The role itself — declares that EC2 instances can assume it.
@@ -33,7 +33,7 @@ resource "aws_iam_role_policy_attachment" "ecr_readonly" {
 }
 
 # Grants access to read the secrets.toml stored in SSM Parameter Store.
-# Scoped to /stock-portal/* so this role can't read any other app's secrets.
+# Scoped to the app's SSM path so this role can't read any other app's secrets.
 # The secrets.toml holds Google OAuth credentials for the portal login.
 resource "aws_iam_role_policy" "ssm_secrets" {
   name = "stock-portal-ssm-secrets"
@@ -44,7 +44,7 @@ resource "aws_iam_role_policy" "ssm_secrets" {
     Statement = [{
       Effect   = "Allow"
       Action   = ["ssm:GetParameter"]
-      Resource = "arn:aws:ssm:ap-south-1:782818417773:parameter/stock-portal/*"
+      Resource = "arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter${var.ssm_secrets_path}/*"
     }]
   })
 }
