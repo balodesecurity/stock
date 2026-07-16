@@ -55,10 +55,20 @@ resource "aws_instance" "stock_portal" {
   vpc_security_group_ids = [aws_security_group.stock_portal.id]
   iam_instance_profile   = aws_iam_instance_profile.stock_portal.name
 
+  # Runs on first boot only when launching a fresh instance.
+  # Does not affect the currently running instance.
+  user_data = file("${path.module}/user_data.sh")
+
   root_block_device {
     volume_size           = 8
     volume_type           = "gp3"
     delete_on_termination = true
+  }
+
+  # user_data only runs on first boot — ignore config changes so Terraform
+  # doesn't try to replace the running instance when user_data is updated.
+  lifecycle {
+    ignore_changes = [user_data]
   }
 
   tags = {
