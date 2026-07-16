@@ -71,6 +71,8 @@ jobs:
             aws ecr get-login-password --region "$AWS_REGION" \
               | docker login --username AWS --password-stdin \
                   "$(echo $ECR_IMAGE | cut -d/ -f1)"
+            # Remove stopped containers and unused images to prevent disk exhaustion on the 8GB volume
+            docker system prune -f
             docker pull "$ECR_IMAGE"
             docker stop "$CONTAINER_NAME" && docker rm "$CONTAINER_NAME"
             docker run -d \
