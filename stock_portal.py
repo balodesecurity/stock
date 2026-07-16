@@ -1606,8 +1606,10 @@ def main():
     if _portfolio_tab_name:
         _nav_styles[_portfolio_tab_name] = (5, '#38bdf8')
         _nav_styles['FAQ'] = (6, '#f472b6')
+        _nav_styles['Admin'] = (7, '#fb923c')
     else:
         _nav_styles['FAQ'] = (5, '#f472b6')
+        _nav_styles['Admin'] = (6, '#fb923c')
 
     _ni, _nc = _nav_styles[_nav]
     st.markdown(
